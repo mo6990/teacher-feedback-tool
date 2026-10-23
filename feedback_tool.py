@@ -11,30 +11,35 @@ st.caption("普通班 / VIP班独立考核 · 上传Excel自动生成结果 · �
 with st.sidebar:
     st.header("📖 使用说明")
     st.markdown("""
-    1. 上传两个Excel文件：普通班反馈表、VIP班反馈表
+    1. 上传Excel文件（普通班/VIP班均可，支持只传一个）
     2. 表格必须包含核心字段：
-       - 项目
+       - 项目/产品品类
        - 教师姓名
        - 是否进行班级学情反馈（Y/N）
-       - 是否进行个人学情反馈（格式：已反馈/总人数，如 5/6）
-    3. 系统自动清洗重复表头、计算考核指标
-    4. 支持按项目筛选、导出完整结果Excel
+    3. 系统自动只统计侧边栏名单里的老师
+    4. 左侧可随时增删老师名单，自动重新计算
     """)
+    st.markdown("---")
+    st.subheader("📋 考核老师名单（可编辑）")
+    default_names = """张洊维、姚蓓蓓、胡海枫、赵万铖、魏志如、吴恙、顾毅清云、杨安小、张玉玲"""
+    name_input = st.text_area("修改名单，用顿号分隔", value=default_names, height=150)
+    # 解析名单
+    target_names = [n.strip() for n in name_input.replace("，", "、").split("、") if n.strip()]
+    st.caption(f"当前共 {len(target_names)} 位老师")
+
     st.markdown("---")
     st.subheader("考核规则")
     st.markdown("""
     - 班级反馈完成率 = 班级反馈Y的课次 ÷ 总课次
-    - 个人反馈完成率 = 已反馈总人数 ÷ 应反馈总人数
-    - 综合完成率 = 班级率×50% + 个人率×50%
-    - **优秀**：综合 ≥ 90%
-    - **合格**：70% ≤ 综合 ＜ 90%
-    - **待改进**：综合 ＜ 70%
+    - **优秀**：完成率 ≥ 90%
+    - **合格**：70% ≤ 完成率 ＜ 90%
+    - **待改进**：完成率 ＜ 70%
     """)
 
 
-def calculate_teacher_stats(df):
+def calculate_teacher_stats(df, target_names):
     """
-    输入原始课次明细DataFrame，自动适配普通班/VIP班格式，输出统计结果
+    输入原始课次明细DataFrame，只统计目标名单里的老师，只算班级反馈
     """
     data = df.copy()
 
@@ -57,7 +62,13 @@ def calculate_teacher_stats(df):
     data = data[data[project_col] != project_col]
     data = data.reset_index(drop=True)
 
-    # ========== 3. 处理班级学情反馈字段 ==========
+    # ========== 3. 只保留目标名单里的老师 ==========
+    data = data[data["教师姓名"].isin(target_names)].reset_index(drop=True)
+    if data.empty:
+        st.warning("⚠️ 上传的表格里没有找到名单中的老师，请检查名字是否匹配")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    # ========== 4. 处理班级学情反馈字段 ==========
     if "是否进行班级学情反馈" in data.columns:
         data["是否进行班级学情反馈"] = data["是否进行班级学情反馈"].astype(str).str.strip().str.upper()
         data["班级反馈完成"] = data["是否进行班级学情反馈"] == "Y"
@@ -65,42 +76,11 @@ def calculate_teacher_stats(df):
         st.error("❌ 表格缺少「是否进行班级学情反馈」字段，请检查上传文件")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # ========== 4. 处理个人学情反馈字段（自动识别格式） ==========
-    if "是否进行个人学情反馈" not in data.columns:
-        st.error("❌ 表格缺少「是否进行个人学情反馈」字段，请检查上传文件")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    # 自动判断是 Y/N 格式 还是 已反馈/总人数 格式
-    sample_vals = data["是否进行个人学情反馈"].astype(str).head(20).tolist()
-    has_slash = any("/" in str(v) for v in sample_vals)
-
-    if has_slash:
-        # 普通班格式：已反馈/总人数
-        def split_feedback(x):
-            try:
-                x = str(x).strip()
-                if "/" in x:
-                    done, total = x.split("/", 1)
-                    return int(done), int(total)
-                return 0, 0
-            except:
-                return 0, 0
-        data[["个人已反馈数", "个人总人数"]] = data["是否进行个人学情反馈"].apply(
-            lambda x: pd.Series(split_feedback(x))
-        )
-    else:
-        # VIP班格式：Y/N，每节课对应1个学员
-        data["个人反馈完成"] = data["是否进行个人学情反馈"].astype(str).str.strip().str.upper() == "Y"
-        data["个人已反馈数"] = data["个人反馈完成"].astype(int)
-        data["个人总人数"] = 1  # 1对1课，每节课1个人
-
-    # ========== 5. 按 教师姓名 分组统计（汇总所有项目、所有科目） ==========
-    # 先统计每个老师带的项目和科目列表
+    # ========== 5. 按 教师姓名 分组统计 ==========
     teacher_info = data.groupby("教师姓名").agg(
         负责项目=(project_col, lambda x: "、".join(sorted(x.dropna().unique())))
     ).reset_index()
 
-    # 检查是否有科目名称列
     has_subject = "科目名称" in data.columns
     if has_subject:
         teacher_subjects = data.groupby("教师姓名")["科目名称"].apply(lambda x: "、".join(sorted(x.dropna().unique()))).reset_index()
@@ -109,21 +89,14 @@ def calculate_teacher_stats(df):
 
     stats = data.groupby("教师姓名").agg(
         总授课课次=("教师姓名", "count"),
-        班级反馈完成课次=("班级反馈完成", "sum"),
-        个人已反馈总数=("个人已反馈数", "sum"),
-        个人应反馈总数=("个人总人数", "sum")
+        班级反馈完成课次=("班级反馈完成", "sum")
     ).reset_index()
 
-    # 合并老师信息
     stats = stats.merge(teacher_info, on="教师姓名", how="left")
 
-    # ========== 6. 计算各项完成率 ==========
+    # ========== 6. 计算完成率 ==========
     stats["班级反馈完成率"] = stats["班级反馈完成课次"] / stats["总授课课次"]
-    stats["个人反馈完成率"] = stats.apply(
-        lambda row: row["个人已反馈总数"] / row["个人应反馈总数"] if row["个人应反馈总数"] > 0 else 0,
-        axis=1
-    )
-    stats["综合完成率"] = stats["班级反馈完成率"] * 0.5 + stats["个人反馈完成率"] * 0.5
+    stats["综合完成率"] = stats["班级反馈完成率"]  # 只算班级反馈
 
     # ========== 7. 判定考核等级 ==========
     def get_level(rate):
@@ -141,8 +114,8 @@ def calculate_teacher_stats(df):
 
     # 生成用于展示的百分比格式表
     stats_show = stats.copy()
-    for col in ["班级反馈完成率", "个人反馈完成率", "综合完成率"]:
-        stats_show[col] = stats_show[col].apply(lambda x: f"{x*100:.1f}%")
+    stats_show["班级反馈完成率"] = stats_show["班级反馈完成率"].apply(lambda x: f"{x*100:.1f}%")
+    stats_show["综合完成率"] = stats_show["综合完成率"].apply(lambda x: f"{x*100:.1f}%")
 
     return stats, stats_show, data
 
@@ -184,7 +157,7 @@ if normal_file is not None or vip_file is not None:
     if normal_file is not None:
         try:
             normal_raw = pd.read_excel(normal_file)
-            normal_stats, normal_show, normal_detail = calculate_teacher_stats(normal_raw)
+            normal_stats, normal_show, normal_detail = calculate_teacher_stats(normal_raw, target_names)
             if not normal_stats.empty:
                 has_normal = True
         except Exception as e:
@@ -194,7 +167,7 @@ if normal_file is not None or vip_file is not None:
     if vip_file is not None:
         try:
             vip_raw = pd.read_excel(vip_file)
-            vip_stats, vip_show, vip_detail = calculate_teacher_stats(vip_raw)
+            vip_stats, vip_show, vip_detail = calculate_teacher_stats(vip_raw, target_names)
             if not vip_stats.empty:
                 has_vip = True
         except Exception as e:
@@ -226,6 +199,8 @@ if normal_file is not None or vip_file is not None:
 
         # 动态生成标签页
         tab_names = []
+        if has_normal and has_vip:
+            tab_names.append("综合汇总（普通+VIP）")
         if has_normal:
             tab_names.append("普通班考核排名")
         if has_vip:
@@ -235,6 +210,43 @@ if normal_file is not None or vip_file is not None:
 
         tabs = st.tabs(tab_names)
         tab_i = 0
+
+        # 综合汇总标签页（只有同时上传两个表才显示）
+        if has_normal and has_vip:
+            with tabs[tab_i]:
+                st.subheader("综合汇总：普通班+VIP班 整体反馈完成率")
+                # 合并两个表的统计结果
+                combined = pd.concat([
+                    normal_stats[["教师姓名", "总授课课次", "班级反馈完成课次"]],
+                    vip_stats[["教师姓名", "总授课课次", "班级反馈完成课次"]]
+                ]).groupby("教师姓名").sum().reset_index()
+                combined["班级反馈完成率"] = combined["班级反馈完成课次"] / combined["总授课课次"]
+                
+                def get_level(rate):
+                    if rate >= 0.9:
+                        return "优秀"
+                    elif rate >= 0.7:
+                        return "合格"
+                    else:
+                        return "待改进"
+                combined["考核等级"] = combined["班级反馈完成率"].apply(get_level)
+                combined = combined.sort_values("班级反馈完成率", ascending=False).reset_index(drop=True)
+                
+                # 格式化展示
+                combined_show = combined.copy()
+                combined_show["班级反馈完成率"] = combined_show["班级反馈完成率"].apply(lambda x: f"{x*100:.1f}%")
+                st.dataframe(combined_show)
+                
+                # 同时展示各班型明细
+                st.caption("各班型明细：")
+                col_c1, col_c2 = st.columns(2)
+                with col_c1:
+                    st.write("普通班")
+                    st.dataframe(normal_show)
+                with col_c2:
+                    st.write("VIP班")
+                    st.dataframe(vip_show)
+            tab_i += 1
 
         if has_normal:
             with tabs[tab_i]:
