@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import os
 from io import BytesIO
 
 # 页面基础配置
@@ -137,7 +138,16 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.patches import FancyBboxPatch
-    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "SimSun"]
+    from matplotlib import font_manager
+
+    # 注册中文字体（优先使用同目录下的思源黑体，兼容云部署）
+    font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NotoSansSC-Regular.otf")
+    if os.path.exists(font_path):
+        font_manager.fontManager.addfont(font_path)
+        font_name = font_manager.FontProperties(fname=font_path).get_name()
+        plt.rcParams["font.sans-serif"] = [font_name, "Microsoft YaHei", "SimHei", "SimSun"]
+    else:
+        plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "SimSun"]
     plt.rcParams["axes.unicode_minus"] = False
 
     # 收集每个老师在班课和VIP的完成率（数值 0-1）
