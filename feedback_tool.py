@@ -12,7 +12,7 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 
 
-DEFAULT_NAMES = "张洊维、姚蓓蓓、胡海枫、赵万铖、魏志如、吴恙、顾毅清云、杨安小、张玉玲"
+DEFAULT_NAMES = "张洊维、姚蓓蓓、胡海枫、赵万铖、魏志如、吴恙、顾毅清云、杨安小、张玉玲、宋蕊君"
 RATE = "班级反馈完成率"
 BASE_DIR = Path(__file__).resolve().parent
 LEVEL_COLORS = {
