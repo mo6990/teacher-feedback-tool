@@ -140,14 +140,27 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
     from matplotlib.patches import FancyBboxPatch
     from matplotlib import font_manager
 
-    # 注册中文字体（优先使用TTF格式，服务器渲染更稳定；OTF作备用）
+    # ===== 中文字体：本地文件优先，否则自动下载（保证云端中文清晰） =====
+    import tempfile, urllib.request
     font_candidates = ["SimHei.ttf", "NotoSansSC-Regular.otf"]
     font_path = None
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     for cand in font_candidates:
-        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), cand)
+        p = os.path.join(base_dir, cand)
         if os.path.exists(p):
             font_path = p
             break
+    if font_path is None:
+        # 仓库没有字体文件时，自动从网络下载SimHei（TTF，渲染稳定）
+        try:
+            tmp = os.path.join(tempfile.gettempdir(), "SimHei_auto.ttf")
+            if not os.path.exists(tmp):
+                urllib.request.urlretrieve(
+                    "https://github.com/StellarCN/scp_zh/raw/master/fonts/SimHei.ttf",
+                    tmp)
+            font_path = tmp
+        except Exception:
+            font_path = None
     if font_path:
         font_manager.fontManager.addfont(font_path)
         font_name = font_manager.FontProperties(fname=font_path).get_name()
@@ -182,53 +195,43 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
     fig = plt.figure(figsize=(12, fig_h), dpi=150, facecolor="white")
 
     # ========== 标题区 ==========
-    fig.text(0.5, 0.974, title_text, ha="center", va="center",
+    fig.text(0.5, 0.972, title_text, ha="center", va="center",
              fontsize=17, color="#1E293B")
-    fig.text(0.5, 0.950, subtitle_text, ha="center", va="center",
+    fig.text(0.5, 0.945, subtitle_text, ha="center", va="center",
              fontsize=11.5, color="#64748B")
 
     # ========== 布局坐标（fig相对坐标） ==========
     x_name_l, x_name_r = 0.030, 0.155        # 姓名列
     x_n_l, x_n_r = 0.185, 0.500              # 班课条形区
     x_v_l, x_v_r = 0.525, 0.840              # VIP条形区
-    head_bottom = 0.898                      # 表头区底边
-    head_h = 0.042                           # 表头高度
-    body_top = head_bottom - 0.010           # 条形区顶边
+    head_bottom = 0.902                      # 表头区底边
+    head_h = 0.046                           # 表头高度
+    body_top = head_bottom - 0.008           # 条形区顶边
     body_bottom = 0.085                      # 条形区底边
     body_h = body_top - body_bottom
 
-    # ========== 图例（表头上方：教师姓名 + 色块标注） ==========
-    legend_y = 0.924
-    sw, sh = 0.015, 0.021                    # 色块尺寸
-    # 教师姓名（纯文字）
-    fig.text((x_name_l + x_name_r) / 2, legend_y, "教师姓名",
-             ha="center", va="center", fontsize=10, color="#334155", zorder=6)
-    # 班课图例：蓝色色块 + 文字
-    fig.patches.append(plt.Rectangle(
-        ((x_n_l + x_n_r) / 2 - 0.028 - sw / 2, legend_y - sh / 2),
-        sw, sh, facecolor="#2563EB", edgecolor="none", zorder=6))
-    fig.text((x_n_l + x_n_r) / 2 + 0.015, legend_y, "班课学情反馈率",
-             ha="center", va="center", fontsize=10, color="#334155", zorder=6)
-    # VIP图例：绿色色块 + 文字
-    fig.patches.append(plt.Rectangle(
-        ((x_v_l + x_v_r) / 2 - 0.028 - sw / 2, legend_y - sh / 2),
-        sw, sh, facecolor="#10B981", edgecolor="none", zorder=6))
-    fig.text((x_v_l + x_v_r) / 2 + 0.015, legend_y, "VIP学情反馈率",
-             ha="center", va="center", fontsize=10, color="#334155", zorder=6)
-
-    # ========== 表头（深色背景条 + 白字） ==========
-    headers = [
-        (x_name_l, x_name_r, "教师姓名"),
-        (x_n_l, x_n_r, "班课学情反馈率"),
-        (x_v_l, x_v_r, "VIP学情反馈率"),
+    # ========== 表头（深蓝底白字 + 班课/VIP色块） ==========
+    sw, sh = 0.014, 0.022                    # 表头内色块尺寸
+    header_cells = [
+        (x_name_l, x_name_r, "教师姓名", None),
+        (x_n_l, x_n_r, "班课学情反馈率", "#3B82F6"),
+        (x_v_l, x_v_r, "VIP学情反馈率", "#34D399"),
     ]
-    for x0, x1, label in headers:
+    for x0, x1, label, block_color in header_cells:
         rect = plt.Rectangle((x0, head_bottom), x1 - x0, head_h,
                              facecolor="#1F3864", edgecolor="none", zorder=5)
         fig.patches.append(rect)
-        fig.text((x0 + x1) / 2, head_bottom + head_h / 2, label,
-                 ha="center", va="center", fontsize=11,
-                 color="white", zorder=6)
+        cx = (x0 + x1) / 2
+        if block_color:
+            # 色块嵌在表头文字左侧（深蓝底上的亮色块）
+            fig.patches.append(plt.Rectangle(
+                (cx - 0.062, head_bottom + (head_h - sh) / 2),
+                sw, sh, facecolor=block_color, edgecolor="none", zorder=6))
+            fig.text(cx + 0.005, head_bottom + head_h / 2, label,
+                     ha="center", va="center", fontsize=11, color="white", zorder=6)
+        else:
+            fig.text(cx, head_bottom + head_h / 2, label,
+                     ha="center", va="center", fontsize=11, color="white", zorder=6)
 
     # ========== 条形区 ==========
     ax_n = fig.add_axes([x_n_l, body_bottom, x_n_r - x_n_l, body_h])
