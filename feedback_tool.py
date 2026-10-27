@@ -131,6 +131,142 @@ def generate_excel(normal_show, vip_show, normal_detail, vip_detail):
     return output.getvalue()
 
 
+def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subtitle_text):
+    """生成「班课 vs VIP 按教师逐项对照」的反馈率图表（美观版），返回PNG字节"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch
+    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "SimSun"]
+    plt.rcParams["axes.unicode_minus"] = False
+
+    # 收集每个老师在班课和VIP的完成率（数值 0-1）
+    rows = []
+    for name in target_names:
+        rate_n = None
+        rate_v = None
+        if normal_stats is not None and not normal_stats.empty:
+            sub = normal_stats[normal_stats["教师姓名"] == name]
+            if not sub.empty:
+                rate_n = float(sub.iloc[0]["班级反馈完成率"])
+        if vip_stats is not None and not vip_stats.empty:
+            sub = vip_stats[vip_stats["教师姓名"] == name]
+            if not sub.empty:
+                rate_v = float(sub.iloc[0]["班级反馈完成率"])
+        rows.append((name, rate_n, rate_v))
+
+    # 按完成率从高到低排序（班课与VIP取非空值的平均作为排序依据）
+    def sort_key(row):
+        vals = [v for v in (row[1], row[2]) if v is not None]
+        return sum(vals) / len(vals) if vals else 0.0
+    rows.sort(key=sort_key, reverse=True)
+
+    n = len(rows)
+    fig_h = max(2.5, 2.1 + 0.72 * n)
+    fig = plt.figure(figsize=(12, fig_h), dpi=150, facecolor="white")
+
+    # ========== 标题区 ==========
+    fig.text(0.5, 0.970, title_text, ha="center", va="center",
+             fontsize=17, fontweight="bold", color="#1E293B")
+    fig.text(0.5, 0.938, subtitle_text, ha="center", va="center",
+             fontsize=11.5, color="#64748B")
+
+    # ========== 布局坐标（fig相对坐标） ==========
+    x_name_l, x_name_r = 0.030, 0.155        # 姓名列
+    x_n_l, x_n_r = 0.185, 0.500              # 班课条形区
+    x_v_l, x_v_r = 0.525, 0.840              # VIP条形区
+    head_bottom = 0.905                      # 表头区底边
+    head_h = 0.048                           # 表头高度
+    body_top = head_bottom - 0.010           # 条形区顶边
+    body_bottom = 0.085                      # 条形区底边
+    body_h = body_top - body_bottom
+
+    # ========== 表头（深色背景条 + 白字） ==========
+    headers = [
+        (x_name_l, x_name_r, "教师姓名"),
+        (x_n_l, x_n_r, "班课学情反馈率"),
+        (x_v_l, x_v_r, "VIP学情反馈率"),
+    ]
+    for x0, x1, label in headers:
+        rect = plt.Rectangle((x0, head_bottom), x1 - x0, head_h,
+                             facecolor="#1F3864", edgecolor="none", zorder=5)
+        fig.patches.append(rect)
+        fig.text((x0 + x1) / 2, head_bottom + head_h / 2, label,
+                 ha="center", va="center", fontsize=11, fontweight="bold",
+                 color="white", zorder=6)
+
+    # ========== 条形区 ==========
+    ax_n = fig.add_axes([x_n_l, body_bottom, x_n_r - x_n_l, body_h])
+    ax_v = fig.add_axes([x_v_l, body_bottom, x_v_r - x_v_l, body_h])
+
+    y_pos = [1.0 - (i + 0.5) / n for i in range(n)]   # 第一行在顶部
+    bar_h = 0.60 / n                                  # 条形高度随行数缩放
+
+    # 配色：班课蓝 / VIP绿
+    colors = {"n": "#2563EB", "v": "#10B981"}
+    bgcolors = {"n": "#E2EAFD", "v": "#DCFCE7"}
+    none_labels = {"n": "— 无班课", "v": "— 无VIP"}
+
+    def draw_bars(ax, rates, color, bgcolor, none_label):
+        # 行交替底色 + 满格浅色背景 + 圆角条形 + 数值
+        for i, yi in enumerate(y_pos):
+            # 交替行底色（仅奇数行）
+            if i % 2 == 1:
+                ax.axhspan((n - i - 1) / n, (n - i) / n,
+                           facecolor="#F6F8FB", edgecolor="none", zorder=0)
+        for yi, r in zip(y_pos, rates):
+            # 满格浅色背景（0~1）
+            rs = min(0.012, bar_h / 2)
+            ax.add_patch(FancyBboxPatch(
+                (0, yi - bar_h / 2), 1.0, bar_h,
+                boxstyle=f"round,pad=0,rounding_size={rs}",
+                linewidth=0, facecolor=bgcolor, zorder=2))
+            # 实际比例条形
+            if r is not None and r > 0:
+                ax.add_patch(FancyBboxPatch(
+                    (0, yi - bar_h / 2), r, bar_h,
+                    boxstyle=f"round,pad=0,rounding_size={rs}",
+                    linewidth=0, facecolor=color, zorder=3))
+            # 数值标签
+            if r is not None:
+                ax.text(r + 0.015, yi, f"{r*100:.2f}%", va="center", ha="left",
+                        fontsize=10.5, fontweight="bold", color="#1E293B", zorder=4)
+            else:
+                ax.text(0.02, yi, none_label, va="center", ha="left",
+                        fontsize=9.5, color="#94A3B8", zorder=4)
+        # 坐标细节
+        ax.set_xlim(0, 1.30)
+        ax.set_ylim(0, 1)
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["0%", "100%"], fontsize=9.5, color="#64748B")
+        ax.tick_params(axis="x", length=0, pad=4)
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        # 底部基线
+        ax.axhline(0, color="#CBD5E1", linewidth=1.1, zorder=5)
+
+    draw_bars(ax_n, [r[1] for r in rows], colors["n"], bgcolors["n"], none_labels["n"])
+    draw_bars(ax_v, [r[2] for r in rows], colors["v"], bgcolors["v"], none_labels["v"])
+
+    # ========== 教师姓名列（白底 + 交替底色 + 深色文字） ==========
+    for i, (name, rn, rv) in enumerate(rows):
+        if i % 2 == 1:
+            fig.patches.append(plt.Rectangle(
+                (x_name_l, body_bottom + body_h * (n - i - 1) / n),
+                x_name_r - x_name_l, body_h / n,
+                facecolor="#F6F8FB", edgecolor="none", zorder=1))
+        fig_y = body_bottom + body_h * y_pos[i]
+        fig.text((x_name_l + x_name_r) / 2, fig_y, name,
+                 ha="center", va="center", fontsize=11.5, fontweight="bold",
+                 color="#1E293B", zorder=4)
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return buf.getvalue()
+
+
 # ========== 页面主体：文件上传 ==========
 col1, col2 = st.columns(2)
 with col1:
@@ -199,6 +335,8 @@ if normal_file is not None or vip_file is not None:
 
         # 动态生成标签页
         tab_names = []
+        if has_normal or has_vip:
+            tab_names.append("📊 反馈率图表")
         if has_normal and has_vip:
             tab_names.append("综合汇总（普通+VIP）")
         if has_normal:
@@ -210,6 +348,36 @@ if normal_file is not None or vip_file is not None:
 
         tabs = st.tabs(tab_names)
         tab_i = 0
+
+        # 图表标签页（班课 vs VIP 对照图，可下载）
+        if has_normal or has_vip:
+            with tabs[tab_i]:
+                st.subheader("📊 学情反馈率图表（班课 vs VIP）")
+                chart_title = st.text_input(
+                    "图表标题",
+                    value="贵阳新东方国际教育雅思阅写组学情反馈（9.1-10.16）",
+                    key="chart_title"
+                )
+                chart_subtitle = st.text_input(
+                    "副标题",
+                    value="班课与VIP 按教师逐项对照",
+                    key="chart_subtitle"
+                )
+                chart_img = generate_chart_image(
+                    normal_stats if has_normal else None,
+                    vip_stats if has_vip else None,
+                    target_names,
+                    chart_title,
+                    chart_subtitle
+                )
+                st.image(chart_img, use_column_width=True)
+                st.download_button(
+                    label="📥 下载反馈率图表PNG",
+                    data=chart_img,
+                    file_name="学情反馈率图表.png",
+                    mime="image/png"
+                )
+            tab_i += 1
 
         # 综合汇总标签页（只有同时上传两个表才显示）
         if has_normal and has_vip:
