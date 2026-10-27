@@ -1,542 +1,410 @@
-import streamlit as st
-import pandas as pd
-import os
+"""教师反馈完成率看板。运行：streamlit run feedback_tool.py"""
+
 from io import BytesIO
+from pathlib import Path
+import re
 
-# 页面基础配置
-st.set_page_config(page_title="教师反馈完成率考核系统", layout="wide")
-st.title("教师反馈完成率考核系统")
-st.caption("普通班 / VIP班独立考核 · 上传Excel自动生成结果 · 支持一键导出")
+import pandas as pd
+import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
 
-# 侧边栏说明
-with st.sidebar:
-    st.header("📖 使用说明")
-    st.markdown("""
-    1. 上传Excel文件（普通班/VIP班均可，支持只传一个）
-    2. 表格必须包含核心字段：
-       - 项目/产品品类
-       - 教师姓名
-       - 是否进行班级学情反馈（Y/N）
-    3. 系统自动只统计侧边栏名单里的老师
-    4. 左侧可随时增删老师名单，自动重新计算
-    """)
-    st.markdown("---")
-    st.subheader("📋 考核老师名单（可编辑）")
-    default_names = """张洊维、姚蓓蓓、胡海枫、赵万铖、魏志如、吴恙、顾毅清云、杨安小、张玉玲"""
-    name_input = st.text_area("修改名单，用顿号分隔", value=default_names, height=150)
-    # 解析名单
-    target_names = [n.strip() for n in name_input.replace("，", "、").split("、") if n.strip()]
-    st.caption(f"当前共 {len(target_names)} 位老师")
 
-    st.markdown("---")
-    st.subheader("考核规则")
-    st.markdown("""
-    - 班级反馈完成率 = 班级反馈Y的课次 ÷ 总课次
-    - **优秀**：完成率 ≥ 90%
-    - **合格**：70% ≤ 完成率 ＜ 90%
-    - **待改进**：完成率 ＜ 70%
-    """)
+DEFAULT_NAMES = "张洊维、姚蓓蓓、胡海枫、赵万铖、魏志如、吴恙、顾毅清云、杨安小、张玉玲"
+RATE = "班级反馈完成率"
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def parse_names(value):
+    return list(dict.fromkeys(n.strip() for n in re.split(r"[、,，;；\n]+", value) if n.strip()))
+
+
+def get_level(rate):
+    return "优秀" if rate >= 0.9 else "合格" if rate >= 0.7 else "待改进"
 
 
 def calculate_teacher_stats(df, target_names):
-    """
-    输入原始课次明细DataFrame，只统计目标名单里的老师，只算班级反馈
-    """
+    """保留原考核口径：一行视为一课次，仅 Y 算完成。"""
     data = df.copy()
-
-    # 先统一列名去空格
     data.columns = data.columns.astype(str).str.strip()
-
-    # ========== 1. 自动识别项目字段 ==========
-    project_col = None
-    if "项目" in data.columns:
-        project_col = "项目"
-    elif "产品品类" in data.columns:
-        project_col = "产品品类"
-    
+    if data.columns.duplicated().any():
+        raise ValueError("存在重复列名，请先检查 Excel 表头。")
+    project_col = next((col for col in ("项目", "产品品类") if col in data), None)
+    required = ["教师姓名", "是否进行班级学情反馈"]
+    missing = [col for col in required if col not in data]
     if project_col is None:
-        st.error("❌ 表格缺少项目字段（「项目」或「产品品类」），请检查上传文件")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    # ========== 2. 数据清洗：过滤空行、重复表头行 ==========
+        missing.append("项目（或产品品类）")
+    if missing:
+        raise ValueError("缺少字段：" + "、".join(missing))
     data = data.dropna(subset=["教师姓名", project_col])
-    data = data[data[project_col] != project_col]
-    data = data.reset_index(drop=True)
-
-    # ========== 3. 只保留目标名单里的老师 ==========
+    data["教师姓名"] = data["教师姓名"].astype(str).str.strip()
+    data[project_col] = data[project_col].astype(str).str.strip()
+    data = data[(data[project_col] != project_col) & (data[project_col] != "")]
     data = data[data["教师姓名"].isin(target_names)].reset_index(drop=True)
     if data.empty:
-        st.warning("⚠️ 上传的表格里没有找到名单中的老师，请检查名字是否匹配")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    # ========== 4. 处理班级学情反馈字段 ==========
-    if "是否进行班级学情反馈" in data.columns:
-        data["是否进行班级学情反馈"] = data["是否进行班级学情反馈"].astype(str).str.strip().str.upper()
-        data["班级反馈完成"] = data["是否进行班级学情反馈"] == "Y"
-    else:
-        st.error("❌ 表格缺少「是否进行班级学情反馈」字段，请检查上传文件")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    # ========== 5. 按 教师姓名 分组统计 ==========
-    teacher_info = data.groupby("教师姓名").agg(
-        负责项目=(project_col, lambda x: "、".join(sorted(x.dropna().unique())))
+        return pd.DataFrame(), pd.DataFrame(), data
+    data["是否进行班级学情反馈"] = (
+        data["是否进行班级学情反馈"].fillna("").astype(str).str.strip().str.upper()
+    )
+    data["班级反馈完成"] = data["是否进行班级学情反馈"].eq("Y")
+    stats = data.groupby("教师姓名", sort=False).agg(
+        总授课课次=("教师姓名", "size"),
+        班级反馈完成课次=("班级反馈完成", "sum"),
+        负责项目=(project_col, lambda x: "、".join(sorted(set(x)))),
     ).reset_index()
-
-    has_subject = "科目名称" in data.columns
-    if has_subject:
-        teacher_subjects = data.groupby("教师姓名")["科目名称"].apply(lambda x: "、".join(sorted(x.dropna().unique()))).reset_index()
-        teacher_subjects.columns = ["教师姓名", "负责科目"]
-        teacher_info = teacher_info.merge(teacher_subjects, on="教师姓名", how="left")
-
-    stats = data.groupby("教师姓名").agg(
-        总授课课次=("教师姓名", "count"),
-        班级反馈完成课次=("班级反馈完成", "sum")
-    ).reset_index()
-
-    stats = stats.merge(teacher_info, on="教师姓名", how="left")
-
-    # ========== 6. 计算完成率 ==========
-    stats["班级反馈完成率"] = stats["班级反馈完成课次"] / stats["总授课课次"]
-    stats["综合完成率"] = stats["班级反馈完成率"]  # 只算班级反馈
-
-    # ========== 7. 判定考核等级 ==========
-    def get_level(rate):
-        if rate >= 0.9:
-            return "优秀"
-        elif rate >= 0.7:
-            return "合格"
-        else:
-            return "待改进"
-
-    stats["考核等级"] = stats["综合完成率"].apply(get_level)
-
-    # 按综合完成率降序排列
-    stats = stats.sort_values("综合完成率", ascending=False).reset_index(drop=True)
-
-    # 生成用于展示的百分比格式表
-    stats_show = stats.copy()
-    stats_show["班级反馈完成率"] = stats_show["班级反馈完成率"].apply(lambda x: f"{x*100:.1f}%")
-    stats_show["综合完成率"] = stats_show["综合完成率"].apply(lambda x: f"{x*100:.1f}%")
-
-    return stats, stats_show, data
+    if "科目名称" in data:
+        subjects = data.groupby("教师姓名")["科目名称"].apply(
+            lambda x: "、".join(sorted({str(v).strip() for v in x.dropna() if str(v).strip()}))
+        )
+        stats["负责科目"] = stats["教师姓名"].map(subjects)
+    stats[RATE] = stats["班级反馈完成课次"] / stats["总授课课次"]
+    stats["综合完成率"] = stats[RATE]
+    stats["考核等级"] = stats[RATE].map(get_level)
+    stats = stats.sort_values(RATE, ascending=False, kind="stable").reset_index(drop=True)
+    show = stats.copy()
+    for col in (RATE, "综合完成率"):
+        show[col] = show[col].map(lambda x: f"{x:.1%}")
+    return stats, show, data
 
 
-def generate_excel(normal_show, vip_show, normal_detail, vip_detail):
-    """将所有结果打包为Excel文件，支持下载"""
+def get_font_path():
+    # 云端优先使用随项目提交的字体，不依赖运行时联网下载。
+    candidates = [
+        BASE_DIR / "fonts" / "NotoSansSC-Regular.otf",
+        BASE_DIR / "NotoSansSC-Regular.otf",
+        BASE_DIR / "SimHei.ttf",
+        Path("C:/Windows/Fonts/msyh.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    raise FileNotFoundError("缺少中文字体。请一并上传 fonts 文件夹内的 NotoSansSC-Regular.otf。")
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subtitle_text):
+    """按像素排版并以 2 倍分辨率绘制，避免比例坐标导致文字重叠。"""
+    scale, width = 2, 1440
+    font_path = get_font_path()
+    fonts = {size: ImageFont.truetype(font_path, size * scale) for size in (14, 16, 18, 20, 22, 30, 32)}
+    scratch = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+
+    def text_width(text, size):
+        return scratch.textlength(str(text), font=fonts[size]) / scale
+
+    def wrap(text, size, max_width):
+        lines = []
+        for paragraph in str(text).split("\n"):
+            line = ""
+            for char in paragraph:
+                if line and text_width(line + char, size) > max_width:
+                    lines.append(line)
+                    line = char
+                else:
+                    line += char
+            lines.append(line)
+        return lines or [""]
+
+    def lookup(frame):
+        if frame is None or frame.empty:
+            return {}
+        return {row["教师姓名"]: row for row in frame.to_dict("records")}
+
+    normal, vip = lookup(normal_stats), lookup(vip_stats)
+    rows = [(name, normal.get(name), vip.get(name)) for name in dict.fromkeys(target_names)]
+    if not rows:
+        raise ValueError("请至少填写一位教师。")
+
+    def rank(row):
+        rates = [record[RATE] for record in row[1:] if record is not None]
+        return sum(rates) / len(rates) if rates else -1
+
+    rows.sort(key=rank, reverse=True)
+    title_lines = wrap(title_text.strip() or "教师学情反馈完成率", 32, 1288)
+    subtitle_lines = wrap(subtitle_text.strip(), 18, 1288) if subtitle_text.strip() else []
+    title_y = 86
+    subtitle_y = title_y + len(title_lines) * 48 + 12
+    cards_y = subtitle_y + len(subtitle_lines) * 29 + 30
+    table_y = cards_y + 140
+    row_heights = [max(104, len(wrap(row[0], 22, 208)) * 31 + 36) for row in rows]
+    footer_y = table_y + 82 + sum(row_heights) + 24
+    height = footer_y + 112
+    image = Image.new("RGB", (width * scale, height * scale), "#F3F6FA")
+    draw = ImageDraw.Draw(image)
+
+    def rect(box, fill, radius=0, outline=None):
+        coords = tuple(round(v * scale) for v in box)
+        draw.rounded_rectangle(coords, radius=round(radius * scale), fill=fill, outline=outline, width=scale)
+
+    def line(points, color, thickness=1):
+        draw.line([(round(x * scale), round(y * scale)) for x, y in points], fill=color, width=thickness * scale)
+
+    def text(x, y, value, size=18, color="#172B4D", align="left"):
+        value = str(value)
+        if align == "right":
+            x -= text_width(value, size)
+        draw.text((round(x * scale), round(y * scale)), value, font=fonts[size], fill=color, anchor="lt")
+
+    rect((48, 44, 54, 64), "#2563EB", 3)
+    text(68, 45, "教学运营  /  学情反馈", 16, "#64748B")
+    for i, title in enumerate(title_lines):
+        text(48, title_y + 48 * i, title, 32)
+    for i, subtitle in enumerate(subtitle_lines):
+        text(48, subtitle_y + 29 * i, subtitle, 18, "#64748B")
+
+    available = set(normal) | set(vip)
+    needs_attention = {name for name, a, b in rows if any(r is not None and r[RATE] < 0.7 for r in (a, b))}
+
+    def average(records):
+        vals = [record[RATE] for name, record in records.items() if name in target_names]
+        return f"{sum(vals) / len(vals):.1%}" if vals else "—"
+
+    cards = [
+        ("有课教师", f"{len(available & set(target_names))} 位", "#172B4D"),
+        ("班课 · 教师平均完成率", average(normal), "#2563EB"),
+        ("VIP · 教师平均完成率", average(vip), "#059669"),
+        ("待跟进教师 · 已去重", f"{len(needs_attention)} 位", "#C27816"),
+    ]
+    for i, (label, value, color) in enumerate(cards):
+        x = 48 + i * 340
+        rect((x, cards_y, x + 324, cards_y + 112), "white", 16)
+        text(x + 22, cards_y + 20, label, 16, "#64748B")
+        text(x + 22, cards_y + 52, value, 32, color)
+
+    table_end = footer_y - 24
+    rect((48, table_y, 1392, table_end), "white", 18)
+    text(76, table_y + 25, "教师姓名", 20)
+    rect((330, table_y + 29, 338, table_y + 49), "#2563EB", 4)
+    text(352, table_y + 25, "班课学情反馈率", 20, "#1D4ED8")
+    rect((866, table_y + 29, 874, table_y + 49), "#059669", 4)
+    text(888, table_y + 25, "VIP 学情反馈率", 20, "#047857")
+    line([(76, table_y + 72), (1364, table_y + 72)], "#E2E8F0")
+
+    def draw_rate(x, y, record, color, track_color, empty_label):
+        right = x + 462
+        if record is None:
+            text(x, y + 8, empty_label, 18, "#94A3B8")
+            rect((x, y + 49, right, y + 61), "#F1F5F9", 6)
+            return
+        rate = float(record[RATE])
+        level = get_level(rate)
+        text(x, y + 8, f"{rate:.2%}", 22, color)
+        completed, total = record.get("班级反馈完成课次"), record.get("总授课课次")
+        if completed is not None and total is not None:
+            text(right, y + 13, f"完成 {int(completed)} / {int(total)} 课次", 16, "#64748B", "right")
+        rect((x, y + 49, right, y + 61), track_color, 6)
+        if rate > 0:
+            fill_width = min(462, max(1, round(462 * rate)))
+            rect((x, y + 49, x + fill_width, y + 61), color, min(6, fill_width / 2))
+        level_color = "#B7791F" if rate < 0.7 else "#64748B"
+        text(x, y + 70, level, 14, level_color)
+
+    y = table_y + 82
+    for index, ((name, normal_record, vip_record), row_height) in enumerate(zip(rows, row_heights)):
+        if index % 2 == 1:
+            rect((64, y, 1376, y + row_height), "#F8FAFC", 10)
+        name_lines = wrap(name, 22, 208)
+        name_y = y + (row_height - len(name_lines) * 31) / 2
+        for j, name_line in enumerate(name_lines):
+            text(76, name_y + j * 31, name_line, 22)
+        draw_rate(330, y + (row_height - 104) / 2, normal_record, "#2563EB", "#E7EEFF", "暂无班课记录")
+        draw_rate(866, y + (row_height - 104) / 2, vip_record, "#059669", "#DFF5EB", "暂无 VIP 记录")
+        y += row_height
+
+    text(52, footer_y, "优秀 ≥ 90%     合格 ≥ 70% 且 < 90%     待改进 < 70%", 16, "#64748B")
+    text(52, footer_y + 29, "完成率 = 班级反馈 Y 课次 / 总课次；无课记录不计入均值。", 14, "#94A3B8")
+    text(52, footer_y + 53, "按班课、VIP 非空完成率的算术平均降序排列；待跟进指任一班型完成率低于 70%。", 14, "#94A3B8")
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        normal_show.to_excel(writer, index=False, sheet_name="普通班考核结果")
-        vip_show.to_excel(writer, index=False, sheet_name="VIP班考核结果")
-        normal_detail.to_excel(writer, index=False, sheet_name="普通班课次明细")
-        vip_detail.to_excel(writer, index=False, sheet_name="VIP班课次明细")
+    image.save(output, format="PNG", optimize=True, dpi=(240, 240))
     return output.getvalue()
 
 
-def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subtitle_text):
-    """生成「班课 vs VIP 按教师逐项对照」的反馈率图表（美观版），返回PNG字节"""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import FancyBboxPatch
-    from matplotlib import font_manager
+@st.cache_data(show_spinner=False, max_entries=16)
+def generate_excel(sheets):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
-    # ===== 中文字体：本地文件优先，否则自动下载（保证云端中文清晰） =====
-    import tempfile, urllib.request
-    font_candidates = ["SimHei.ttf", "NotoSansSC-Regular.otf"]
-    font_path = None
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    for cand in font_candidates:
-        p = os.path.join(base_dir, cand)
-        if os.path.exists(p):
-            font_path = p
-            break
-    if font_path is None:
-        # 仓库没有字体文件时，自动从网络下载SimHei（TTF，渲染稳定）
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for name, frame in sheets.items():
+            frame.to_excel(writer, index=False, sheet_name=name)
+            sheet = writer.sheets[name]
+            sheet.freeze_panes = "B2"
+            sheet.auto_filter.ref = sheet.dimensions
+            sheet.row_dimensions[1].height = 30
+            for cell in sheet[1]:
+                cell.fill = PatternFill("solid", fgColor="172B4D")
+                cell.font = Font(color="FFFFFF", bold=True)
+                cell.alignment = Alignment(vertical="center")
+            for index, col in enumerate(frame.columns, 1):
+                longest = max([len(str(col)) * 2] + [len(str(v)) for v in frame[col].head(100)])
+                sheet.column_dimensions[get_column_letter(index)].width = min(44, max(16, longest + 4))
+                if col in (RATE, "综合完成率"):
+                    for cells in sheet.iter_rows(min_row=2, min_col=index, max_col=index):
+                        if isinstance(cells[0].value, (int, float)):
+                            cells[0].number_format = "0.0%"
+            for row in sheet.iter_rows(min_row=2):
+                for cell in row:
+                    # 原始表格中的文本原样导出，避免以 = 开头的文本变为公式。
+                    if cell.data_type == "f":
+                        cell.data_type = "s"
+                    cell.alignment = Alignment(vertical="center")
+                    if cell.row % 2 == 0:
+                        cell.fill = PatternFill("solid", fgColor="F3F6FA")
+    return output.getvalue()
+
+
+def show_ranking(frame, key):
+    view = frame.copy()
+    if "负责科目" in view:
+        options = sorted({part for item in view["负责科目"].dropna() for part in str(item).split("、") if part})
+        if options:
+            selected = st.multiselect("按科目筛选", options, default=options, key=key)
+            view = view[view["负责科目"].map(lambda value: any(part in selected for part in str(value).split("、")))]
+    cols = [col for col in ("教师姓名", "负责项目", "负责科目", "总授课课次", "班级反馈完成课次", RATE, "考核等级") if col in view]
+    view = view[cols].copy()
+    view[RATE] *= 100
+    st.dataframe(
+        view, hide_index=True, use_container_width=True,
+        column_config={
+            RATE: st.column_config.ProgressColumn("班级反馈完成率", format="%.1f%%", min_value=0, max_value=100, width="medium"),
+            "教师姓名": st.column_config.TextColumn(width="small"),
+        },
+    )
+
+
+def main():
+    st.set_page_config(page_title="学情反馈 · 教师考核", page_icon="📊", layout="wide")
+    st.markdown("""
+    <style>
+    .stApp {background: #f5f7fb;}
+    .block-container {max-width: 1440px; padding-top: 2.2rem; padding-bottom: 3rem;}
+    [data-testid="stSidebar"] {background: #fff; border-right: 1px solid #e6ebf2;}
+    h1, h2, h3 {color: #172b4d; letter-spacing: -.025em;}
+    [data-testid="stMetric"] {background: white; border: 1px solid #e6ebf2;
+        border-radius: 16px; padding: 18px 22px; min-height: 125px;}
+    [data-testid="stMetricLabel"] {color: #64748b;}
+    [data-testid="stMetricValue"] {color: #172b4d; font-weight: 650;}
+    [data-testid="stFileUploader"] {background: white; border-radius: 14px; padding: 12px;}
+    [data-testid="stTabs"] [role="tablist"] {gap: 20px;}
+    [data-testid="stTabs"] [role="tab"] {font-size: 15px; padding-bottom: 12px;}
+    [data-testid="stDownloadButton"] button {border-radius: 10px;}
+    .page-kicker {color: #2563eb; font-size: 13px; font-weight: 700; letter-spacing: .12em; margin-bottom: 8px;}
+    .page-note {color: #64748b; font-size: 15px; margin: -4px 0 24px; line-height: 1.8;}
+    @media (max-width: 640px) {
+        .block-container {padding: 1.2rem 1rem 2rem;}
+        [data-testid="stMetric"] {padding: 14px; min-height: 110px;}
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    with st.sidebar:
+        st.subheader("考核设置")
+        st.caption("编辑名单后，结果会自动更新。")
+        name_input = st.text_area("教师名单", DEFAULT_NAMES, height=190,
+                                  help="支持顿号、逗号、分号或换行分隔；重复姓名会自动去重。")
+        target_names = parse_names(name_input)
+        st.caption(f"当前名单 · {len(target_names)} 位教师")
+        st.divider()
+        st.markdown("**完成率考核规则**")
+        st.markdown("🟢 **优秀**　≥ 90%\n\n🔵 **合格**　70%–90%（不含 90%）\n\n🟠 **待改进**　< 70%")
+        st.caption("完成率 = 班级反馈 Y 课次 ÷ 总授课课次。普通班与 VIP 班独立考核。")
+        with st.expander("查看上传要求"):
+            st.markdown("上传 `.xlsx` 文件，第一行为表头，需包含：\n- 项目或产品品类\n- 教师姓名\n- 是否进行班级学情反馈")
+            st.caption("支持只上传一个班型；仅统计名单内教师。每一行按一课次统计。空白反馈也计入总课次，但不算完成。")
+
+    st.markdown('<div class="page-kicker">教学运营 / FEEDBACK INSIGHTS</div>', unsafe_allow_html=True)
+    st.title("教师学情反馈看板")
+    st.markdown('<div class="page-note">用一张图看清反馈进度，让每一次课后跟进都有据可依。</div>', unsafe_allow_html=True)
+    left, right = st.columns(2)
+    with left:
+        normal_file = st.file_uploader("班课 · 上传普通班反馈表", type=["xlsx"], key="normal_upload")
+    with right:
+        vip_file = st.file_uploader("VIP · 上传 VIP 反馈表", type=["xlsx"], key="vip_upload")
+    if not target_names:
+        st.info("请在左侧填写至少一位教师，再开始统计。")
+        return
+    if normal_file is None and vip_file is None:
+        st.info("上传至少一份反馈表，即可查看完成率、教师排名和待跟进清单。")
+        return
+
+    results, details = {}, {}
+    for label, uploaded in (("普通班", normal_file), ("VIP班", vip_file)):
+        if uploaded is None:
+            continue
         try:
-            tmp = os.path.join(tempfile.gettempdir(), "SimHei_auto.ttf")
-            if not os.path.exists(tmp):
-                urllib.request.urlretrieve(
-                    "https://github.com/StellarCN/scp_zh/raw/master/fonts/SimHei.ttf",
-                    tmp)
-            font_path = tmp
-        except Exception:
-            font_path = None
-    if font_path:
-        font_manager.fontManager.addfont(font_path)
-        font_name = font_manager.FontProperties(fname=font_path).get_name()
-        plt.rcParams["font.sans-serif"] = [font_name, "Microsoft YaHei", "SimHei", "SimSun"]
-    else:
-        plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "SimSun"]
-    plt.rcParams["axes.unicode_minus"] = False
+            frame = pd.read_excel(uploaded)
+            stats, _, detail = calculate_teacher_stats(frame, target_names)
+            if stats.empty:
+                st.warning(f"{label}：未找到名单内教师的有效课次，请核对姓名和项目字段。")
+                continue
+            results[label], details[label] = stats, detail
+            unexpected = ~detail["是否进行班级学情反馈"].isin(["Y", "N"])
+            if unexpected.any():
+                st.warning(f"{label}有 {int(unexpected.sum())} 条反馈值为空或非 Y/N，已按未完成计入，请核对原表。")
+        except Exception as exc:
+            st.error(f"{label}读取失败：{exc}")
+    if not results:
+        return
 
-    # 收集每个老师在班课和VIP的完成率（数值 0-1）
-    rows = []
-    for name in target_names:
-        rate_n = None
-        rate_v = None
-        if normal_stats is not None and not normal_stats.empty:
-            sub = normal_stats[normal_stats["教师姓名"] == name]
-            if not sub.empty:
-                rate_n = float(sub.iloc[0]["班级反馈完成率"])
-        if vip_stats is not None and not vip_stats.empty:
-            sub = vip_stats[vip_stats["教师姓名"] == name]
-            if not sub.empty:
-                rate_v = float(sub.iloc[0]["班级反馈完成率"])
-        rows.append((name, rate_n, rate_v))
+    all_stats = pd.concat([frame.assign(班型=label) for label, frame in results.items()], ignore_index=True)
+    bad = all_stats[all_stats[RATE] < 0.7].copy()
+    st.subheader("完成情况概览")
+    cols = st.columns(4)
+    cols[0].metric("有课教师", f"{all_stats['教师姓名'].nunique()} 位", help="至少一个班型有课次的教师人数，跨班型去重。")
+    for col, label, text_label in ((cols[1], "普通班", "班课 · 教师平均完成率"), (cols[2], "VIP班", "VIP · 教师平均完成率")):
+        col.metric(text_label, f"{results[label][RATE].mean():.1%}" if label in results else "—",
+                   help="有课教师完成率的算术平均；不是全部课次的加权完成率。")
+    cols[3].metric("待跟进教师", f"{bad['教师姓名'].nunique()} 位", help="任一班型完成率低于 70% 的教师人数，跨班型去重。")
+    st.caption("按当前教师名单统计 · 缺少课次的班型显示为「—」，不当作 0%。")
 
-    # 按完成率从高到低排序（班课与VIP取非空值的平均作为排序依据）
-    def sort_key(row):
-        vals = [v for v in (row[1], row[2]) if v is not None]
-        return sum(vals) / len(vals) if vals else 0.0
-    rows.sort(key=sort_key, reverse=True)
+    tab_chart, tab_ranking, tab_followup, tab_details = st.tabs(["反馈率对照图", "教师考核排名", "待跟进清单", "原始课次明细"])
+    with tab_chart:
+        with st.expander("自定义图表标题", expanded=False):
+            chart_title = st.text_input("图表标题", "贵阳新东方国际教育雅思阅写组学情反馈", max_chars=160)
+            chart_subtitle = st.text_input("副标题 / 统计周期", "班课与 VIP · 按教师逐项对照", max_chars=240)
+        try:
+            chart = generate_chart_image(results.get("普通班"), results.get("VIP班"), target_names, chart_title, chart_subtitle)
+            st.image(chart, use_container_width=True)
+            st.download_button("下载高清图表 PNG", chart, "学情反馈率图表.png", "image/png", type="primary")
+            st.caption("按两个班型非空完成率的算术平均排序。下载原图可查看高清文字。")
+        except Exception as exc:
+            st.error(f"图表生成失败：{exc}")
 
-    n = len(rows)
-    fig_h = max(2.5, 2.1 + 0.72 * n)
-    fig = plt.figure(figsize=(12, fig_h), dpi=150, facecolor="white")
-
-    # ========== 标题区 ==========
-    fig.text(0.5, 0.972, title_text, ha="center", va="center",
-             fontsize=17, color="#1E293B")
-    fig.text(0.5, 0.945, subtitle_text, ha="center", va="center",
-             fontsize=11.5, color="#64748B")
-
-    # ========== 布局坐标（fig相对坐标） ==========
-    x_name_l, x_name_r = 0.030, 0.155        # 姓名列
-    x_n_l, x_n_r = 0.185, 0.500              # 班课条形区
-    x_v_l, x_v_r = 0.525, 0.840              # VIP条形区
-    head_bottom = 0.902                      # 表头区底边
-    head_h = 0.046                           # 表头高度
-    body_top = head_bottom - 0.008           # 条形区顶边
-    body_bottom = 0.085                      # 条形区底边
-    body_h = body_top - body_bottom
-
-    # ========== 表头（深蓝底白字 + 班课/VIP色块） ==========
-    sw, sh = 0.014, 0.022                    # 表头内色块尺寸
-    header_cells = [
-        (x_name_l, x_name_r, "教师姓名", None),
-        (x_n_l, x_n_r, "班课学情反馈率", "#3B82F6"),
-        (x_v_l, x_v_r, "VIP学情反馈率", "#34D399"),
-    ]
-    for x0, x1, label, block_color in header_cells:
-        rect = plt.Rectangle((x0, head_bottom), x1 - x0, head_h,
-                             facecolor="#1F3864", edgecolor="none", zorder=5)
-        fig.patches.append(rect)
-        cx = (x0 + x1) / 2
-        if block_color:
-            # 色块嵌在表头文字左侧（深蓝底上的亮色块）
-            fig.patches.append(plt.Rectangle(
-                (cx - 0.062, head_bottom + (head_h - sh) / 2),
-                sw, sh, facecolor=block_color, edgecolor="none", zorder=6))
-            fig.text(cx + 0.005, head_bottom + head_h / 2, label,
-                     ha="center", va="center", fontsize=11, color="white", zorder=6)
+    with tab_ranking:
+        labels = list(results)
+        if len(results) == 2:
+            labels.append("综合汇总")
+        selected = st.radio("查看班型", labels, horizontal=True, key="ranking_class")
+        if selected == "综合汇总":
+            combined = all_stats.groupby("教师姓名")[["总授课课次", "班级反馈完成课次"]].sum().reset_index()
+            combined[RATE] = combined["班级反馈完成课次"] / combined["总授课课次"]
+            combined["考核等级"] = combined[RATE].map(get_level)
+            st.caption("综合完成率按两个班型的课次合并计算；各班型的独立考核结果保持不变。")
+            show_ranking(combined.sort_values(RATE, ascending=False), "subjects_combined")
         else:
-            fig.text(cx, head_bottom + head_h / 2, label,
-                     ha="center", va="center", fontsize=11, color="white", zorder=6)
+            show_ranking(results[selected], "subjects_" + selected)
+    with tab_followup:
+        if bad.empty:
+            st.success("当前有课教师在各班型的完成率均达到 70%，暂无待跟进记录。")
+        else:
+            st.caption(f"{bad['教师姓名'].nunique()} 位教师 · {len(bad)} 条班型考核记录 · 按完成率从低到高排列")
+            followup = bad.sort_values(RATE)[["班型", "教师姓名", "总授课课次", "班级反馈完成课次", RATE, "考核等级"]].copy()
+            followup[RATE] = followup[RATE].map(lambda value: f"{value:.1%}")
+            st.dataframe(followup, hide_index=True, use_container_width=True)
+    with tab_details:
+        selected_detail = st.radio("明细班型", list(details), horizontal=True, key="detail_class")
+        st.caption(f"仅展示名单内教师的有效课次，共 {len(details[selected_detail])} 条。")
+        st.dataframe(details[selected_detail], hide_index=True, use_container_width=True)
 
-    # ========== 条形区 ==========
-    ax_n = fig.add_axes([x_n_l, body_bottom, x_n_r - x_n_l, body_h])
-    ax_v = fig.add_axes([x_v_l, body_bottom, x_v_r - x_v_l, body_h])
-
-    y_pos = [1.0 - (i + 0.5) / n for i in range(n)]   # 第一行在顶部
-    bar_h = 0.60 / n                                  # 条形高度随行数缩放
-
-    # 配色：班课蓝 / VIP绿
-    colors = {"n": "#2563EB", "v": "#10B981"}
-    bgcolors = {"n": "#E2EAFD", "v": "#DCFCE7"}
-    none_labels = {"n": "— 无班课", "v": "— 无VIP"}
-
-    def draw_bars(ax, rates, color, bgcolor, none_label):
-        # 行交替底色 + 满格浅色背景 + 圆角条形 + 数值
-        for i, yi in enumerate(y_pos):
-            # 交替行底色（仅奇数行）
-            if i % 2 == 1:
-                ax.axhspan((n - i - 1) / n, (n - i) / n,
-                           facecolor="#F6F8FB", edgecolor="none", zorder=0)
-        for yi, r in zip(y_pos, rates):
-            # 满格浅色背景（0~1）
-            rs = min(0.012, bar_h / 2)
-            ax.add_patch(FancyBboxPatch(
-                (0, yi - bar_h / 2), 1.0, bar_h,
-                boxstyle=f"round,pad=0,rounding_size={rs}",
-                linewidth=0, facecolor=bgcolor, zorder=2))
-            # 实际比例条形
-            if r is not None and r > 0:
-                ax.add_patch(FancyBboxPatch(
-                    (0, yi - bar_h / 2), r, bar_h,
-                    boxstyle=f"round,pad=0,rounding_size={rs}",
-                    linewidth=0, facecolor=color, zorder=3))
-            # 数值标签
-            if r is not None:
-                ax.text(r + 0.015, yi, f"{r*100:.2f}%", va="center", ha="left",
-                        fontsize=10.5, color="#1E293B", zorder=4)
-            else:
-                ax.text(0.02, yi, none_label, va="center", ha="left",
-                        fontsize=9.5, color="#94A3B8", zorder=4)
-        # 坐标细节
-        ax.set_xlim(0, 1.30)
-        ax.set_ylim(0, 1)
-        ax.set_xticks([0, 1])
-        ax.set_xticklabels(["0%", "100%"], fontsize=9.5, color="#64748B")
-        ax.tick_params(axis="x", length=0, pad=4)
-        ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        # 底部基线
-        ax.axhline(0, color="#CBD5E1", linewidth=1.1, zorder=5)
-
-    draw_bars(ax_n, [r[1] for r in rows], colors["n"], bgcolors["n"], none_labels["n"])
-    draw_bars(ax_v, [r[2] for r in rows], colors["v"], bgcolors["v"], none_labels["v"])
-
-    # ========== 教师姓名列（白底 + 交替底色 + 深色文字） ==========
-    for i, (name, rn, rv) in enumerate(rows):
-        if i % 2 == 1:
-            fig.patches.append(plt.Rectangle(
-                (x_name_l, body_bottom + body_h * (n - i - 1) / n),
-                x_name_r - x_name_l, body_h / n,
-                facecolor="#F6F8FB", edgecolor="none", zorder=1))
-        fig_y = body_bottom + body_h * y_pos[i]
-        fig.text((x_name_l + x_name_r) / 2, fig_y, name,
-                 ha="center", va="center", fontsize=11.5,
-                 color="#1E293B", zorder=4)
-
-    buf = BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return buf.getvalue()
+    st.divider()
+    sheets = {}
+    for label, frame in results.items():
+        sheets[label + "考核结果"] = frame
+        sheets[label + "课次明细"] = details[label]
+    st.download_button("导出完整考核结果 Excel", generate_excel(sheets), "教师反馈完成率考核结果.xlsx",
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.caption("包含已上传班型的考核结果和课次明细；页面科目筛选不影响完整导出。")
 
 
-# ========== 页面主体：文件上传 ==========
-col1, col2 = st.columns(2)
-with col1:
-    normal_file = st.file_uploader(
-        "📤 上传普通班反馈表",
-        type=["xlsx"],
-        help="直接导出的原始Excel即可，无需提前清理重复表头"
-    )
-with col2:
-    vip_file = st.file_uploader(
-        "📤 上传VIP班反馈表",
-        type=["xlsx"],
-        help="字段格式与普通班保持一致"
-    )
-
-# ========== 文件上传后自动计算 ==========
-if normal_file is not None or vip_file is not None:
-    normal_stats, normal_show, normal_detail = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    vip_stats, vip_show, vip_detail = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    has_normal = False
-    has_vip = False
-
-    # 处理普通班
-    if normal_file is not None:
-        try:
-            normal_raw = pd.read_excel(normal_file)
-            normal_stats, normal_show, normal_detail = calculate_teacher_stats(normal_raw, target_names)
-            if not normal_stats.empty:
-                has_normal = True
-        except Exception as e:
-            st.error(f"普通班文件读取失败：{str(e)}")
-
-    # 处理VIP班
-    if vip_file is not None:
-        try:
-            vip_raw = pd.read_excel(vip_file)
-            vip_stats, vip_show, vip_detail = calculate_teacher_stats(vip_raw, target_names)
-            if not vip_stats.empty:
-                has_vip = True
-        except Exception as e:
-            st.error(f"VIP班文件读取失败：{str(e)}")
-
-    if has_normal or has_vip:
-        # 整体概览看板
-        st.subheader("📊 整体考核概览")
-        cols = st.columns(4)
-        col_idx = 0
-        if has_normal:
-            with cols[col_idx]:
-                st.metric("普通班教师数", len(normal_stats))
-            col_idx += 1
-            with cols[col_idx]:
-                normal_avg = normal_stats["综合完成率"].mean()
-                st.metric("普通班综合均值", f"{normal_avg*100:.1f}%")
-            col_idx += 1
-        if has_vip:
-            with cols[col_idx]:
-                st.metric("VIP班教师数", len(vip_stats))
-            col_idx += 1
-            with cols[col_idx]:
-                vip_avg = vip_stats["综合完成率"].mean()
-                st.metric("VIP班综合均值", f"{vip_avg*100:.1f}%")
-            col_idx += 1
-
-        st.markdown("---")
-
-        # 动态生成标签页
-        tab_names = []
-        if has_normal or has_vip:
-            tab_names.append("📊 反馈率图表")
-        if has_normal and has_vip:
-            tab_names.append("综合汇总（普通+VIP）")
-        if has_normal:
-            tab_names.append("普通班考核排名")
-        if has_vip:
-            tab_names.append("VIP班考核排名")
-        tab_names.append("待跟进教师清单")
-        tab_names.append("课次明细溯源")
-
-        tabs = st.tabs(tab_names)
-        tab_i = 0
-
-        # 图表标签页（班课 vs VIP 对照图，可下载）
-        if has_normal or has_vip:
-            with tabs[tab_i]:
-                st.subheader("📊 学情反馈率图表（班课 vs VIP）")
-                chart_title = st.text_input(
-                    "图表标题",
-                    value="贵阳新东方国际教育雅思阅写组学情反馈（9.1-10.16）",
-                    key="chart_title"
-                )
-                chart_subtitle = st.text_input(
-                    "副标题",
-                    value="班课与VIP 按教师逐项对照",
-                    key="chart_subtitle"
-                )
-                chart_img = generate_chart_image(
-                    normal_stats if has_normal else None,
-                    vip_stats if has_vip else None,
-                    target_names,
-                    chart_title,
-                    chart_subtitle
-                )
-                st.image(chart_img, use_column_width=True)
-                st.download_button(
-                    label="📥 下载反馈率图表PNG",
-                    data=chart_img,
-                    file_name="学情反馈率图表.png",
-                    mime="image/png"
-                )
-            tab_i += 1
-
-        # 综合汇总标签页（只有同时上传两个表才显示）
-        if has_normal and has_vip:
-            with tabs[tab_i]:
-                st.subheader("综合汇总：普通班+VIP班 整体反馈完成率")
-                # 合并两个表的统计结果
-                combined = pd.concat([
-                    normal_stats[["教师姓名", "总授课课次", "班级反馈完成课次"]],
-                    vip_stats[["教师姓名", "总授课课次", "班级反馈完成课次"]]
-                ]).groupby("教师姓名").sum().reset_index()
-                combined["班级反馈完成率"] = combined["班级反馈完成课次"] / combined["总授课课次"]
-                
-                def get_level(rate):
-                    if rate >= 0.9:
-                        return "优秀"
-                    elif rate >= 0.7:
-                        return "合格"
-                    else:
-                        return "待改进"
-                combined["考核等级"] = combined["班级反馈完成率"].apply(get_level)
-                combined = combined.sort_values("班级反馈完成率", ascending=False).reset_index(drop=True)
-                
-                # 格式化展示
-                combined_show = combined.copy()
-                combined_show["班级反馈完成率"] = combined_show["班级反馈完成率"].apply(lambda x: f"{x*100:.1f}%")
-                st.dataframe(combined_show)
-                
-                # 同时展示各班型明细
-                st.caption("各班型明细：")
-                col_c1, col_c2 = st.columns(2)
-                with col_c1:
-                    st.write("普通班")
-                    st.dataframe(normal_show)
-                with col_c2:
-                    st.write("VIP班")
-                    st.dataframe(vip_show)
-            tab_i += 1
-
-        if has_normal:
-            with tabs[tab_i]:
-                st.subheader("普通班教师反馈考核结果")
-                # 提取所有涉及的科目
-                all_subjects_normal = set()
-                if "负责科目" in normal_stats.columns:
-                    for s in normal_stats["负责科目"].dropna():
-                        for subj in s.split("、"):
-                            all_subjects_normal.add(subj)
-                all_subjects_normal = sorted(list(all_subjects_normal))
-                if all_subjects_normal:
-                    select_normal = st.multiselect("按科目筛选", all_subjects_normal, default=all_subjects_normal, key="n_subj")
-                    mask = normal_stats["负责科目"].apply(lambda x: any(subj in str(x) for subj in select_normal))
-                    st.dataframe(normal_show[mask])
-                else:
-                    st.dataframe(normal_show)
-            tab_i += 1
-
-        if has_vip:
-            with tabs[tab_i]:
-                st.subheader("VIP班教师反馈考核结果")
-                all_subjects_vip = set()
-                if "负责科目" in vip_stats.columns:
-                    for s in vip_stats["负责科目"].dropna():
-                        for subj in s.split("、"):
-                            all_subjects_vip.add(subj)
-                all_subjects_vip = sorted(list(all_subjects_vip))
-                if all_subjects_vip:
-                    select_vip = st.multiselect("按科目筛选", all_subjects_vip, default=all_subjects_vip, key="v_subj")
-                    mask = vip_stats["负责科目"].apply(lambda x: any(subj in str(x) for subj in select_vip))
-                    st.dataframe(vip_show[mask])
-                else:
-                    st.dataframe(vip_show)
-            tab_i += 1
-
-        with tabs[tab_i]:
-            st.subheader("⚠️ 待改进教师清单（综合完成率＜70%）")
-            all_bad_list = []
-            if has_normal:
-                normal_bad = normal_show[normal_stats["综合完成率"] < 0.7].copy()
-                normal_bad.insert(0, "班型", "普通班")
-                all_bad_list.append(normal_bad)
-            if has_vip:
-                vip_bad = vip_show[vip_stats["综合完成率"] < 0.7].copy()
-                vip_bad.insert(0, "班型", "VIP班")
-                all_bad_list.append(vip_bad)
-            all_bad = pd.concat(all_bad_list, ignore_index=True) if all_bad_list else pd.DataFrame()
-            st.dataframe(all_bad)
-            st.caption(f"共 {len(all_bad)} 位教师需重点跟进")
-            tab_i += 1
-
-        with tabs[tab_i]:
-            if has_normal and has_vip:
-                dt1, dt2 = st.tabs(["普通班明细", "VIP班明细"])
-                with dt1:
-                    st.dataframe(normal_detail)
-                with dt2:
-                    st.dataframe(vip_detail)
-            elif has_normal:
-                st.subheader("普通班课次明细")
-                st.dataframe(normal_detail)
-            elif has_vip:
-                st.subheader("VIP班课次明细")
-                st.dataframe(vip_detail)
-
-        # 下载按钮
-        st.markdown("---")
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            if has_normal:
-                normal_show.to_excel(writer, index=False, sheet_name="普通班考核结果")
-                normal_detail.to_excel(writer, index=False, sheet_name="普通班课次明细")
-            if has_vip:
-                vip_show.to_excel(writer, index=False, sheet_name="VIP班考核结果")
-                vip_detail.to_excel(writer, index=False, sheet_name="VIP班课次明细")
-        excel_file = output.getvalue()
-
-        st.download_button(
-            label="📥 下载考核结果Excel",
-            data=excel_file,
-            file_name="教师反馈完成率考核结果.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-else:
-    st.info("👆 请上传至少一个Excel表格（普通班或VIP班均可），系统将自动完成计算")
+if __name__ == "__main__":
+    main()
