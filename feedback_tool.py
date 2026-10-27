@@ -210,7 +210,7 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
     fig.text((x_v_l + x_v_r) / 2 + 0.015, legend_y, "VIP学情反馈率",
              ha="center", va="center", fontsize=10, color="#334155", zorder=6)
 
-    # ========== 表头（深色背景条 + 白字） ==========
+    # ========== 表头（深色背景条 + 黑字） ==========
     headers = [
         (x_name_l, x_name_r, "教师姓名"),
         (x_n_l, x_n_r, "班课学情反馈率"),
