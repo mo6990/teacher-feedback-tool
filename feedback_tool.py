@@ -183,7 +183,7 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
 
     # ========== 标题区 ==========
     fig.text(0.5, 0.974, title_text, ha="center", va="center",
-             fontsize=17, fontweight="bold", color="#1E293B")
+             fontsize=17, color="#1E293B")
     fig.text(0.5, 0.950, subtitle_text, ha="center", va="center",
              fontsize=11.5, color="#64748B")
 
@@ -227,7 +227,7 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
                              facecolor="#1F3864", edgecolor="none", zorder=5)
         fig.patches.append(rect)
         fig.text((x0 + x1) / 2, head_bottom + head_h / 2, label,
-                 ha="center", va="center", fontsize=11, fontweight="bold",
+                 ha="center", va="center", fontsize=11,
                  color="white", zorder=6)
 
     # ========== 条形区 ==========
@@ -265,7 +265,7 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
             # 数值标签
             if r is not None:
                 ax.text(r + 0.015, yi, f"{r*100:.2f}%", va="center", ha="left",
-                        fontsize=10.5, fontweight="bold", color="#1E293B", zorder=4)
+                        fontsize=10.5, color="#1E293B", zorder=4)
             else:
                 ax.text(0.02, yi, none_label, va="center", ha="left",
                         fontsize=9.5, color="#94A3B8", zorder=4)
@@ -293,7 +293,7 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
                 facecolor="#F6F8FB", edgecolor="none", zorder=1))
         fig_y = body_bottom + body_h * y_pos[i]
         fig.text((x_name_l + x_name_r) / 2, fig_y, name,
-                 ha="center", va="center", fontsize=11.5, fontweight="bold",
+                 ha="center", va="center", fontsize=11.5,
                  color="#1E293B", zorder=4)
 
     buf = BytesIO()
