@@ -140,9 +140,15 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
     from matplotlib.patches import FancyBboxPatch
     from matplotlib import font_manager
 
-    # 注册中文字体（优先使用同目录下的思源黑体，兼容云部署）
-    font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NotoSansSC-Regular.otf")
-    if os.path.exists(font_path):
+    # 注册中文字体（优先使用TTF格式，服务器渲染更稳定；OTF作备用）
+    font_candidates = ["SimHei.ttf", "NotoSansSC-Regular.otf"]
+    font_path = None
+    for cand in font_candidates:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), cand)
+        if os.path.exists(p):
+            font_path = p
+            break
+    if font_path:
         font_manager.fontManager.addfont(font_path)
         font_name = font_manager.FontProperties(fname=font_path).get_name()
         plt.rcParams["font.sans-serif"] = [font_name, "Microsoft YaHei", "SimHei", "SimSun"]
@@ -210,7 +216,7 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
     fig.text((x_v_l + x_v_r) / 2 + 0.015, legend_y, "VIP学情反馈率",
              ha="center", va="center", fontsize=10, color="#334155", zorder=6)
 
-    # ========== 表头（深色背景条 + 黑字） ==========
+    # ========== 表头（深色背景条 + 白字） ==========
     headers = [
         (x_name_l, x_name_r, "教师姓名"),
         (x_n_l, x_n_r, "班课学情反馈率"),
