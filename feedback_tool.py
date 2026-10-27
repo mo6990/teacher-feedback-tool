@@ -12,7 +12,7 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 
 
-DEFAULT_NAMES = "张洊维、姚蓓蓓、胡海枫、赵万铖、魏志如、吴恙、顾毅清云、杨安小、张玉玲、宋蕊君"
+DEFAULT_NAMES = "张洊维、姚蓓蓓、胡海枫、赵万铖、魏志如、吴恙、顾毅清云、杨安小、张玉玲"
 RATE = "班级反馈完成率"
 BASE_DIR = Path(__file__).resolve().parent
 LEVEL_COLORS = {
@@ -315,36 +315,38 @@ def result_table_html(frame, title, theme="blue"):
     accent, pale = ("#059669", "#ECFDF5") if theme == "green" else ("#2563EB", "#EFF6FF")
     css = """
     <style>
-    .feedback-table-card {background:white;border:1px solid #E2E8F0;border-radius:18px;overflow:hidden;
-        color:#334155;font-family:Inter,'Microsoft YaHei',sans-serif;margin:12px 0 16px;box-shadow:0 4px 20px #172b4d04;}
-    .feedback-table-top {display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 24px;}
-    .feedback-table-top strong {font-size:18px;color:#172B4D;}
-    .feedback-table-top span {font-size:13px;color:#64748B;}
-    .feedback-table-scroll {overflow:auto;max-height:640px;}
-    .feedback-table {width:100%;border-collapse:collapse;font-size:14px;white-space:nowrap;}
+    .feedback-table-card {background:white;border:1px solid #E2E8F0;border-radius:12px;overflow:hidden;max-width:1100px;
+        color:#334155;font-family:Inter,'Microsoft YaHei',sans-serif;margin:8px 0 12px;box-shadow:0 4px 20px #172b4d04;}
+    .feedback-table-top {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;line-height:22px;}
+    .feedback-table-top strong {font-size:16px;color:#172B4D;min-width:0;flex:1;overflow-wrap:anywhere;}
+    .feedback-table-top span {font-size:12px;color:#64748B;white-space:nowrap;flex-shrink:0;}
+    .feedback-table-scroll {overflow:auto;max-height:560px;}
+    .feedback-table {width:100%;border-collapse:collapse;font-size:14px;line-height:20px;white-space:nowrap;}
     .feedback-table thead th {background:var(--table-pale);color:var(--table-accent);font-weight:600;
-        padding:15px 20px;text-align:left;border-bottom:1px solid #E2E8F0;position:sticky;top:0;z-index:1;}
-    .feedback-table td {padding:18px 20px;border-bottom:1px solid #EDF1F6;vertical-align:middle;}
+        padding:9px 12px;text-align:left;border-bottom:1px solid #E2E8F0;position:sticky;top:0;z-index:1;}
+    .feedback-table td {padding:7px 12px;border-bottom:1px solid #EDF1F6;vertical-align:middle;}
     .feedback-table tbody tr:nth-child(even) {background:#FAFBFD;}
     .feedback-table tbody tr:hover {background:var(--table-pale);}
     .feedback-table tr:last-child td {border-bottom:0;}
     .feedback-table .teacher-name {font-weight:600;color:#172B4D;}
     .feedback-table .number-cell {text-align:center;font-variant-numeric:tabular-nums;}
-    .feedback-table .muted-cell {color:#64748B;max-width:280px;white-space:normal;min-width:100px;overflow-wrap:anywhere;}
+    .feedback-table .muted-cell {color:#64748B;max-width:200px;white-space:normal;min-width:64px;overflow-wrap:anywhere;}
     .feedback-table .order-cell {color:#94A3B8;text-align:center;font-size:13px;}
-    .feedback-pill {display:inline-block;padding:5px 12px;border-radius:7px;font-size:12px;font-weight:600;}
-    .feedback-rate {min-width:160px;max-width:230px;}
-    .feedback-rate-label {display:flex;justify-content:space-between;color:var(--table-accent);font-weight:600;font-variant-numeric:tabular-nums;}
-    .feedback-track {height:6px;border-radius:4px;background:#E8EEF5;margin-top:9px;overflow:hidden;}
+    .feedback-pill {display:inline-block;padding:2px 9px;border-radius:6px;font-size:12px;font-weight:600;}
+    .feedback-rate {display:flex;align-items:center;gap:10px;min-width:150px;max-width:200px;}
+    .feedback-rate-label {flex:0 0 56px;color:var(--table-accent);font-weight:600;font-variant-numeric:tabular-nums;}
+    .feedback-track {flex:1;min-width:72px;height:5px;border-radius:4px;background:#E8EEF5;overflow:hidden;}
     .feedback-track-fill {height:100%;border-radius:4px;background:var(--table-accent);}
-    .feedback-table-foot {padding:14px 24px;background:#FAFBFD;border-top:1px solid #EDF1F6;font-size:12px;color:#64748B;}
+    .feedback-table-foot {padding:8px 16px;line-height:18px;background:#FAFBFD;border-top:1px solid #EDF1F6;font-size:12px;color:#64748B;}
     </style>
     """
     cols = list(frame.columns)
+    labels = {"负责项目": "项目", "负责科目": "科目", "总授课课次": "总课次",
+              "班级反馈完成课次": "已反馈课次", RATE: "反馈完成率"}
     headers = '<th class="order-cell">序号</th>'
     for col in cols:
         cls = ' class="number-cell"' if col in ("总授课课次", "班级反馈完成课次") else ""
-        headers += f'<th{cls}>{escape(str(col))}</th>'
+        headers += f'<th{cls} title="{escape(str(col), quote=True)}">{escape(labels.get(col, str(col)))}</th>'
     rows = []
     for number, record in enumerate(frame.to_dict("records"), 1):
         cells = [f'<td class="order-cell">{number:02d}</td>']
@@ -409,11 +411,29 @@ def interactive_table(frame):
                  height=min(560, max(140, (len(view) + 1) * 36 + 4)))
 
 
-def show_result_table(frame, title, theme="blue"):
+def edit_table_title(default_title, key):
+    # 独立保存标题，切换班型导致输入框暂时消失时，也不会丢失已编辑内容。
+    saved_key = f"saved_table_title_{key}"
+    widget_key = f"_table_title_{key}"
+    if saved_key not in st.session_state:
+        st.session_state[saved_key] = default_title
+    st.session_state[widget_key] = st.session_state[saved_key]
+
+    def save_title():
+        st.session_state[saved_key] = st.session_state[widget_key]
+
+    with st.expander("自定义表格标题", expanded=False):
+        st.text_input("表格标题", key=widget_key, max_chars=160, on_change=save_title,
+                      help="可填写组别、统计周期等信息；留空时使用默认标题。修改后按回车生效。")
+    return st.session_state[saved_key].strip() or default_title
+
+
+def show_result_table(frame, title, theme="blue", key="result"):
     if frame.empty:
         st.info("当前筛选条件下没有记录。")
         return
-    st.html(result_table_html(frame, title, theme))
+    custom_title = edit_table_title(title, key)
+    st.html(result_table_html(frame, custom_title, theme))
     with st.expander("交互表格 · 排序、搜索与复制"):
         interactive_table(frame)
 
@@ -426,7 +446,7 @@ def show_ranking(frame, key, title="教师考核排名", theme="blue"):
             selected = st.multiselect("按科目筛选", options, default=options, key=key)
             view = view[view["负责科目"].map(lambda value: any(part in selected for part in str(value).split("、")))]
     cols = [col for col in ("教师姓名", "负责项目", "负责科目", "总授课课次", "班级反馈完成课次", RATE, "考核等级") if col in view]
-    show_result_table(view[cols], title, theme)
+    show_result_table(view[cols], title, theme, key=key)
 
 
 def main():
@@ -554,9 +574,11 @@ def main():
         else:
             st.caption(f"{bad['教师姓名'].nunique()} 位教师 · {len(bad)} 条班型考核记录 · 按完成率从低到高排列")
             followup = bad.sort_values(RATE)[["班型", "教师姓名", "总授课课次", "班级反馈完成课次", RATE, "考核等级"]].copy()
-            show_result_table(followup, "待跟进教师 · 优先关注")
+            show_result_table(followup, "待跟进教师 · 优先关注", key="followup")
     with tab_details:
         selected_detail = st.radio("明细班型", list(details), horizontal=True, key="detail_class")
+        detail_title = edit_table_title(selected_detail + " · 课次明细", "detail_" + selected_detail)
+        st.subheader(detail_title)
         st.caption(f"仅展示名单内教师的有效课次，共 {len(details[selected_detail])} 条。")
         interactive_table(details[selected_detail])
 
