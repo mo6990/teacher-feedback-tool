@@ -176,20 +176,39 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
     fig = plt.figure(figsize=(12, fig_h), dpi=150, facecolor="white")
 
     # ========== 标题区 ==========
-    fig.text(0.5, 0.970, title_text, ha="center", va="center",
+    fig.text(0.5, 0.974, title_text, ha="center", va="center",
              fontsize=17, fontweight="bold", color="#1E293B")
-    fig.text(0.5, 0.938, subtitle_text, ha="center", va="center",
+    fig.text(0.5, 0.950, subtitle_text, ha="center", va="center",
              fontsize=11.5, color="#64748B")
 
     # ========== 布局坐标（fig相对坐标） ==========
     x_name_l, x_name_r = 0.030, 0.155        # 姓名列
     x_n_l, x_n_r = 0.185, 0.500              # 班课条形区
     x_v_l, x_v_r = 0.525, 0.840              # VIP条形区
-    head_bottom = 0.905                      # 表头区底边
-    head_h = 0.048                           # 表头高度
+    head_bottom = 0.898                      # 表头区底边
+    head_h = 0.042                           # 表头高度
     body_top = head_bottom - 0.010           # 条形区顶边
     body_bottom = 0.085                      # 条形区底边
     body_h = body_top - body_bottom
+
+    # ========== 图例（表头上方：教师姓名 + 色块标注） ==========
+    legend_y = 0.924
+    sw, sh = 0.015, 0.021                    # 色块尺寸
+    # 教师姓名（纯文字）
+    fig.text((x_name_l + x_name_r) / 2, legend_y, "教师姓名",
+             ha="center", va="center", fontsize=10, color="#334155", zorder=6)
+    # 班课图例：蓝色色块 + 文字
+    fig.patches.append(plt.Rectangle(
+        ((x_n_l + x_n_r) / 2 - 0.028 - sw / 2, legend_y - sh / 2),
+        sw, sh, facecolor="#2563EB", edgecolor="none", zorder=6))
+    fig.text((x_n_l + x_n_r) / 2 + 0.015, legend_y, "班课学情反馈率",
+             ha="center", va="center", fontsize=10, color="#334155", zorder=6)
+    # VIP图例：绿色色块 + 文字
+    fig.patches.append(plt.Rectangle(
+        ((x_v_l + x_v_r) / 2 - 0.028 - sw / 2, legend_y - sh / 2),
+        sw, sh, facecolor="#10B981", edgecolor="none", zorder=6))
+    fig.text((x_v_l + x_v_r) / 2 + 0.015, legend_y, "VIP学情反馈率",
+             ha="center", va="center", fontsize=10, color="#334155", zorder=6)
 
     # ========== 表头（深色背景条 + 白字） ==========
     headers = [
