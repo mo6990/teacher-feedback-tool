@@ -3,16 +3,14 @@
 from io import BytesIO
 from pathlib import Path
 from html import escape
-import math
 import re
-import unicodedata
 
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 
 
-DEFAULT_NAMES = "彭钰茂、徐小涵、高弋力、杨安小、顾毅清云、姚蓓蓓、张洊维、赵万铖、陈祉璇、李丽旋、易诗樵、蔡天翔、王皓玥、孙天玥、高子力、胡海枫、张宇瀚、宋蕊君、魏志如、潘蓉、吴蕊、夏梦、刘芳菲、王诗仪、王馨悦、王晨亚盈、刘悦、吴恙、王千羽、吴丹妮、任雨铃、李睿"
+DEFAULT_NAMES = "张洊维、姚蓓蓓、胡海枫、赵万铖、魏志如、吴恙、顾毅清云、杨安小、张玉玲"
 RATE = "班级反馈完成率"
 BASE_DIR = Path(__file__).resolve().parent
 LEVEL_COLORS = {
@@ -279,84 +277,38 @@ def build_export_sheets(results, details):
 
 @st.cache_data(show_spinner=False, max_entries=16)
 def generate_excel(sheets):
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-    from openpyxl.formatting.rule import DataBarRule
-    from openpyxl.utils import get_column_letter
+    """仅写入单元格值，使用 Excel 默认格式；保留汇总和合计。"""
+    from datetime import date, datetime, time, timedelta
+    from openpyxl import Workbook
 
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for name, source in sheets.items():
+        frame = append_total(source)
+        sheet = workbook.create_sheet(name)
+        sheet.append([str(col) for col in frame.columns])
+        for row in frame.itertuples(index=False, name=None):
+            values = []
+            for value in row:
+                if pd.isna(value):
+                    value = None
+                elif isinstance(value, (datetime, date, time)):
+                    # 日期写成可读文本，不引入 Excel 的日期单元格格式。
+                    value = value.isoformat()
+                elif isinstance(value, (timedelta, pd.Timedelta)):
+                    value = str(value)
+                values.append(value)
+            sheet.append(values)
+        for row in sheet:
+            for cell in row:
+                # 表头、合计和数据全部采用默认样式；原始文本保持文本。
+                if cell.data_type == "f":
+                    cell.data_type = "s"
+                cell._style = None
+    if not workbook.sheetnames:
+        workbook.create_sheet("考核结果")
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for name, frame in sheets.items():
-            record_count = len(frame)
-            frame = append_total(frame)
-            has_total = len(frame) > record_count
-            frame.to_excel(writer, index=False, sheet_name=name)
-            sheet = writer.sheets[name]
-            accent = "059669" if "VIP" in name else "2563EB"
-            pale = "F0FAF5" if "VIP" in name else "F3F7FE"
-            sheet.sheet_properties.tabColor = accent
-            sheet.sheet_view.showGridLines = False
-            sheet.freeze_panes = "B2"
-            sheet.auto_filter.ref = f"A1:{get_column_letter(len(frame.columns))}{record_count + 1}"
-            sheet.row_dimensions[1].height = 36
-            sheet.sheet_properties.pageSetUpPr.fitToPage = True
-            sheet.page_setup.orientation = "landscape"
-            sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
-            sheet.page_setup.fitToWidth = 1
-            sheet.page_setup.fitToHeight = 0
-            sheet.print_title_rows = "1:1"
-            sheet.print_options.horizontalCentered = True
-            for cell in sheet[1]:
-                cell.fill = PatternFill("solid", fgColor=accent)
-                cell.font = Font(name="等线", size=11, color="FFFFFF", bold=True)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-            def display_width(value):
-                return max((sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in part)
-                            for part in str(value).splitlines()), default=0)
-
-            for index, col in enumerate(frame.columns, 1):
-                longest = max([display_width(col)] + [display_width(v) for v in frame[col].head(100)])
-                sheet.column_dimensions[get_column_letter(index)].width = min(44, max(16, longest + 4))
-                if col in (RATE, "综合完成率"):
-                    for cells in sheet.iter_rows(min_row=2, min_col=index, max_col=index):
-                        if isinstance(cells[0].value, (int, float)):
-                            cells[0].number_format = "0.0%"
-                    if record_count:
-                        letter = get_column_letter(index)
-                        sheet.conditional_formatting.add(
-                            f"{letter}2:{letter}{record_count + 1}",
-                            DataBarRule(start_type="num", start_value=0, end_type="num", end_value=1,
-                                        color=accent, showValue=True),
-                        )
-            for row in sheet.iter_rows(min_row=2):
-                row_height = 30
-                for cell in row:
-                    # 原始表格中的文本原样导出，避免以 = 开头的文本变为公式。
-                    if cell.data_type == "f":
-                        cell.data_type = "s"
-                    col = str(frame.columns[cell.column - 1])
-                    cell.font = Font(name="等线", size=11, color="334155", bold=col == "教师姓名")
-                    centered = isinstance(cell.value, (int, float, bool)) or col in ("考核等级", "是否进行班级学情反馈", "班型")
-                    cell.alignment = Alignment(horizontal="center" if centered else "left", vertical="center", wrap_text=True)
-                    cell.fill = PatternFill("solid", fgColor=pale if cell.row % 2 == 0 else "FFFFFF")
-                    cell.border = Border(bottom=Side(style="hair", color="E2E8F0"))
-                    if col == "考核等级" and cell.value in LEVEL_COLORS:
-                        foreground, background = LEVEL_COLORS[cell.value]
-                        cell.font = Font(name="等线", size=11, bold=True, color=foreground[1:])
-                        cell.fill = PatternFill("solid", fgColor=background[1:])
-                    elif col == "是否进行班级学情反馈":
-                        is_complete = str(cell.value).upper() == "Y"
-                        cell.font = Font(name="等线", size=11, bold=True, color="047857" if is_complete else "B45309")
-                        cell.fill = PatternFill("solid", fgColor="DCFCE7" if is_complete else "FEF3C7")
-                    width = sheet.column_dimensions[cell.column_letter].width - 3
-                    wrapped_lines = sum(max(1, math.ceil(display_width(part) / width)) for part in str(cell.value or "").split("\n"))
-                    row_height = max(row_height, 18 * wrapped_lines + 10)
-                sheet.row_dimensions[row[0].row].height = min(120, row_height)
-            if has_total:
-                for cell in sheet[sheet.max_row]:
-                    cell.fill = PatternFill("solid", fgColor="DBEAFE" if "VIP" not in name else "D1FAE5")
-                    cell.font = Font(name="等线", size=11, bold=True, color="172B4D")
-                    cell.border = Border(top=Side(style="thin", color=accent))
-                sheet.row_dimensions[sheet.max_row].height = 32
+    workbook.save(output)
     return output.getvalue()
 
 
@@ -639,7 +591,7 @@ def main():
     sheets = build_export_sheets(results, details)
     st.download_button("导出完整考核结果 Excel", generate_excel(sheets), "教师反馈完成率考核结果.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.caption("包含综合汇总、已上传班型的考核结果和课次明细；考核表底部附合计。合计完成率按总课次加权，页面科目筛选不影响完整导出。")
+    st.caption("下载为无格式 Excel，包含综合汇总、各班型考核和课次明细，考核表底部附合计。完成率以小数数值保存（如 0.9 表示 90%）；合计按总课次加权。")
 
 
 if __name__ == "__main__":
