@@ -236,6 +236,47 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
     return output.getvalue()
 
 
+def combine_teacher_stats(results):
+    """同一教师跨班型合并课次，按合并后的分子、分母重算完成率。"""
+    frames = [frame for frame in results.values() if not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True).groupby("教师姓名", sort=False)[
+        ["总授课课次", "班级反馈完成课次"]
+    ].sum().reset_index()
+    combined[RATE] = combined["班级反馈完成课次"].div(combined["总授课课次"].replace(0, float("nan")))
+    combined["考核等级"] = combined[RATE].map(lambda rate: get_level(rate) if pd.notna(rate) else "—")
+    return combined.sort_values(RATE, ascending=False, kind="stable").reset_index(drop=True)
+
+
+def append_total(frame):
+    """仅对考核统计表添加合计，不对原始课次明细中的其他数字求和。"""
+    required = {"教师姓名", "总授课课次", "班级反馈完成课次", RATE}
+    if frame.empty or not required.issubset(frame.columns):
+        return frame.copy()
+    total = {col: "" for col in frame.columns}
+    total["教师姓名"] = "合计"
+    total["总授课课次"] = int(frame["总授课课次"].sum())
+    total["班级反馈完成课次"] = int(frame["班级反馈完成课次"].sum())
+    rate = total["班级反馈完成课次"] / total["总授课课次"] if total["总授课课次"] else float("nan")
+    for col in (RATE, "综合完成率"):
+        if col in frame:
+            total[col] = rate
+    # 合计不是一位教师，不参与教师等级判定。
+    if "考核等级" in frame:
+        total["考核等级"] = "—"
+    return pd.concat([frame, pd.DataFrame([total])], ignore_index=True)
+
+
+def build_export_sheets(results, details):
+    sheets = {"综合汇总": combine_teacher_stats(results)}
+    for label, frame in results.items():
+        sheets[label + "考核结果"] = frame
+    for label, frame in details.items():
+        sheets[label + "课次明细"] = frame
+    return sheets
+
+
 @st.cache_data(show_spinner=False, max_entries=16)
 def generate_excel(sheets):
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -245,6 +286,9 @@ def generate_excel(sheets):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for name, frame in sheets.items():
+            record_count = len(frame)
+            frame = append_total(frame)
+            has_total = len(frame) > record_count
             frame.to_excel(writer, index=False, sheet_name=name)
             sheet = writer.sheets[name]
             accent = "059669" if "VIP" in name else "2563EB"
@@ -252,7 +296,7 @@ def generate_excel(sheets):
             sheet.sheet_properties.tabColor = accent
             sheet.sheet_view.showGridLines = False
             sheet.freeze_panes = "B2"
-            sheet.auto_filter.ref = sheet.dimensions
+            sheet.auto_filter.ref = f"A1:{get_column_letter(len(frame.columns))}{record_count + 1}"
             sheet.row_dimensions[1].height = 36
             sheet.sheet_properties.pageSetUpPr.fitToPage = True
             sheet.page_setup.orientation = "landscape"
@@ -276,10 +320,10 @@ def generate_excel(sheets):
                     for cells in sheet.iter_rows(min_row=2, min_col=index, max_col=index):
                         if isinstance(cells[0].value, (int, float)):
                             cells[0].number_format = "0.0%"
-                    if len(frame):
+                    if record_count:
                         letter = get_column_letter(index)
                         sheet.conditional_formatting.add(
-                            f"{letter}2:{letter}{len(frame) + 1}",
+                            f"{letter}2:{letter}{record_count + 1}",
                             DataBarRule(start_type="num", start_value=0, end_type="num", end_value=1,
                                         color=accent, showValue=True),
                         )
@@ -307,6 +351,12 @@ def generate_excel(sheets):
                     wrapped_lines = sum(max(1, math.ceil(display_width(part) / width)) for part in str(cell.value or "").split("\n"))
                     row_height = max(row_height, 18 * wrapped_lines + 10)
                 sheet.row_dimensions[row[0].row].height = min(120, row_height)
+            if has_total:
+                for cell in sheet[sheet.max_row]:
+                    cell.fill = PatternFill("solid", fgColor="DBEAFE" if "VIP" not in name else "D1FAE5")
+                    cell.font = Font(name="等线", size=11, bold=True, color="172B4D")
+                    cell.border = Border(top=Side(style="thin", color=accent))
+                sheet.row_dimensions[sheet.max_row].height = 32
     return output.getvalue()
 
 
@@ -328,6 +378,7 @@ def result_table_html(frame, title, theme="blue"):
     .feedback-table tbody tr:nth-child(even) {background:#FAFBFD;}
     .feedback-table tbody tr:hover {background:var(--table-pale);}
     .feedback-table tr:last-child td {border-bottom:0;}
+    .feedback-table tbody tr.total-row td {background:var(--table-pale);font-weight:700;border-top:2px solid #CBD5E1;}
     .feedback-table .teacher-name {font-weight:600;color:#172B4D;}
     .feedback-table .number-cell {text-align:center;font-variant-numeric:tabular-nums;}
     .feedback-table .muted-cell {color:#64748B;max-width:200px;white-space:normal;min-width:64px;overflow-wrap:anywhere;}
@@ -348,8 +399,11 @@ def result_table_html(frame, title, theme="blue"):
         cls = ' class="number-cell"' if col in ("总授课课次", "班级反馈完成课次") else ""
         headers += f'<th{cls} title="{escape(str(col), quote=True)}">{escape(labels.get(col, str(col)))}</th>'
     rows = []
-    for number, record in enumerate(frame.to_dict("records"), 1):
-        cells = [f'<td class="order-cell">{number:02d}</td>']
+    display_frame = append_total(frame)
+    for number, record in enumerate(display_frame.to_dict("records"), 1):
+        is_total = number > len(frame)
+        order = "—" if is_total else f"{number:02d}"
+        cells = [f'<td class="order-cell">{order}</td>']
         for col in cols:
             value = record[col]
             if pd.isna(value):
@@ -368,12 +422,13 @@ def result_table_html(frame, title, theme="blue"):
             else:
                 cls = "teacher-name" if col == "教师姓名" else "number-cell" if isinstance(value, (int, float)) else "muted-cell"
                 cells.append(f'<td class="{cls}">{escape(str(value))}</td>')
-        rows.append("<tr>" + "".join(cells) + "</tr>")
+        rows.append(('<tr class="total-row">' if is_total else "<tr>") + "".join(cells) + "</tr>")
     return (css + f'<div class="feedback-table-card" style="--table-accent:{accent};--table-pale:{pale}">'
             f'<div class="feedback-table-top"><strong>{escape(title)}</strong><span>共 {len(frame)} 条记录</span></div>'
             f'<div class="feedback-table-scroll"><table class="feedback-table"><thead><tr>{headers}</tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table></div>'
-            '<div class="feedback-table-foot">优秀 ≥ 90%　 ·　 合格 ≥ 70% 且 &lt; 90%　 ·　 待改进 &lt; 70%</div></div>')
+            '<div class="feedback-table-foot">优秀 ≥ 90%　 ·　 合格 ≥ 70% 且 &lt; 90%　 ·　 待改进 &lt; 70%<br>'
+            '合计按当前表内记录计算；合计完成率 = 已反馈课次合计 ÷ 总课次合计。</div></div>')
 
 
 def interactive_table(frame):
@@ -435,7 +490,7 @@ def show_result_table(frame, title, theme="blue", key="result"):
     custom_title = edit_table_title(title, key)
     st.html(result_table_html(frame, custom_title, theme))
     with st.expander("交互表格 · 排序、搜索与复制"):
-        interactive_table(frame)
+        interactive_table(append_total(frame))
 
 
 def show_ranking(frame, key, title="教师考核排名", theme="blue"):
@@ -560,9 +615,7 @@ def main():
             labels.append("综合汇总")
         selected = st.radio("查看班型", labels, horizontal=True, key="ranking_class")
         if selected == "综合汇总":
-            combined = all_stats.groupby("教师姓名")[["总授课课次", "班级反馈完成课次"]].sum().reset_index()
-            combined[RATE] = combined["班级反馈完成课次"] / combined["总授课课次"]
-            combined["考核等级"] = combined[RATE].map(get_level)
+            combined = combine_teacher_stats(results)
             st.caption("综合完成率按两个班型的课次合并计算；各班型的独立考核结果保持不变。")
             show_ranking(combined.sort_values(RATE, ascending=False), "subjects_combined", "综合汇总 · 教师考核")
         else:
@@ -583,13 +636,10 @@ def main():
         interactive_table(details[selected_detail])
 
     st.divider()
-    sheets = {}
-    for label, frame in results.items():
-        sheets[label + "考核结果"] = frame
-        sheets[label + "课次明细"] = details[label]
+    sheets = build_export_sheets(results, details)
     st.download_button("导出完整考核结果 Excel", generate_excel(sheets), "教师反馈完成率考核结果.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.caption("包含已上传班型的考核结果和课次明细；页面科目筛选不影响完整导出。")
+    st.caption("包含综合汇总、已上传班型的考核结果和课次明细；考核表底部附合计。合计完成率按总课次加权，页面科目筛选不影响完整导出。")
 
 
 if __name__ == "__main__":
