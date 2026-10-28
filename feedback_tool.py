@@ -26,6 +26,8 @@ def parse_names(value):
 
 
 def get_level(rate):
+    if pd.isna(rate):
+        return "—"
     return "优秀" if rate >= 0.9 else "合格" if rate >= 0.7 else "待改进"
 
 
@@ -47,8 +49,6 @@ def calculate_teacher_stats(df, target_names):
     data[project_col] = data[project_col].astype(str).str.strip()
     data = data[(data[project_col] != project_col) & (data[project_col] != "")]
     data = data[data["教师姓名"].isin(target_names)].reset_index(drop=True)
-    if data.empty:
-        return pd.DataFrame(), pd.DataFrame(), data
     data["是否进行班级学情反馈"] = (
         data["是否进行班级学情反馈"].fillna("").astype(str).str.strip().str.upper()
     )
@@ -63,13 +63,20 @@ def calculate_teacher_stats(df, target_names):
             lambda x: "、".join(sorted({str(v).strip() for v in x.dropna() if str(v).strip()}))
         )
         stats["负责科目"] = stats["教师姓名"].map(subjects)
-    stats[RATE] = stats["班级反馈完成课次"] / stats["总授课课次"]
+    # 名单作为完整索引，无课教师仍保留；缺课与反馈完成率为 0% 分开处理。
+    stats = stats.set_index("教师姓名").reindex(list(dict.fromkeys(target_names))).rename_axis("教师姓名").reset_index()
+    for col in ("总授课课次", "班级反馈完成课次"):
+        stats[col] = stats[col].fillna(0).astype(int)
+    for col in ("负责项目", "负责科目"):
+        if col in stats:
+            stats[col] = stats[col].fillna("")
+    stats[RATE] = stats["班级反馈完成课次"] / stats["总授课课次"].replace(0, float("nan"))
     stats["综合完成率"] = stats[RATE]
     stats["考核等级"] = stats[RATE].map(get_level)
     stats = stats.sort_values(RATE, ascending=False, kind="stable").reset_index(drop=True)
     show = stats.copy()
     for col in (RATE, "综合完成率"):
-        show[col] = show[col].map(lambda x: f"{x:.1%}")
+        show[col] = show[col].map(lambda x: f"{x:.1%}" if pd.notna(x) else "—")
     return stats, show, data
 
 
@@ -115,7 +122,7 @@ def generate_chart_image(normal_stats, vip_stats, target_names, title_text, subt
     def lookup(frame):
         if frame is None or frame.empty:
             return {}
-        return {row["教师姓名"]: row for row in frame.to_dict("records")}
+        return {row["教师姓名"]: row for row in frame.to_dict("records") if pd.notna(row[RATE])}
 
     normal, vip = lookup(normal_stats), lookup(vip_stats)
     rows = [(name, normal.get(name), vip.get(name)) for name in dict.fromkeys(target_names)]
@@ -300,9 +307,9 @@ def generate_excel(sheets):
         sheet.append([str(col) for col in frame.columns])
         for row in frame.itertuples(index=False, name=None):
             values = []
-            for value in row:
+            for col, value in zip(frame.columns, row):
                 if pd.isna(value):
-                    value = None
+                    value = "—" if col in (RATE, "综合完成率") else None
                 elif isinstance(value, (datetime, date, time)):
                     # 日期写成可读文本，不引入 Excel 的日期单元格格式。
                     value = value.isoformat()
@@ -466,7 +473,9 @@ def show_ranking(frame, key, title="教师考核排名", theme="blue"):
         options = sorted({part for item in view["负责科目"].dropna() for part in str(item).split("、") if part})
         if options:
             selected = st.multiselect("按科目筛选", options, default=options, key=key)
-            view = view[view["负责科目"].map(lambda value: any(part in selected for part in str(value).split("、")))]
+            matches = view["负责科目"].map(lambda value: any(part in selected for part in str(value).split("、")))
+            view = view[matches | view["总授课课次"].eq(0)]
+            st.caption("无课教师始终保留在表内，完成率和等级显示为「—」。")
     cols = [col for col in RESULT_COLUMNS if col in view]
     show_result_table(view[cols], title, theme, key=key)
 
@@ -533,9 +542,8 @@ def main():
         try:
             frame = pd.read_excel(uploaded)
             stats, _, detail = calculate_teacher_stats(frame, target_names)
-            if stats.empty:
-                st.warning(f"{label}：未找到名单内教师的有效课次，请核对姓名和项目字段。")
-                continue
+            if detail.empty:
+                st.warning(f"{label}：未找到名单内教师的有效课次；已保留全部名单并标记为无课，请核对姓名和项目字段。")
             results[label], details[label] = stats, detail
             unexpected = ~detail["是否进行班级学情反馈"].isin(["Y", "N"])
             if unexpected.any():
@@ -549,9 +557,10 @@ def main():
     bad = all_stats[all_stats[RATE] < 0.7].copy()
     st.subheader("完成情况概览")
     cols = st.columns(4)
-    cols[0].metric("有课教师", f"{all_stats['教师姓名'].nunique()} 位", help="至少一个班型有课次的教师人数，跨班型去重。")
+    cols[0].metric("有课教师", f"{all_stats.loc[all_stats['总授课课次'] > 0, '教师姓名'].nunique()} 位", help="至少一个班型有课次的教师人数，跨班型去重。")
     for col, label, text_label in ((cols[1], "普通班", "班课 · 教师平均完成率"), (cols[2], "VIP班", "VIP · 教师平均完成率")):
-        col.metric(text_label, f"{results[label][RATE].mean():.1%}" if label in results else "—",
+        mean_rate = results[label][RATE].mean() if label in results else float("nan")
+        col.metric(text_label, f"{mean_rate:.1%}" if pd.notna(mean_rate) else "—",
                    help="有课教师完成率的算术平均；不是全部课次的加权完成率。")
     cols[3].metric("待跟进教师", f"{bad['教师姓名'].nunique()} 位", help="任一班型完成率低于 70% 的教师人数，跨班型去重。")
     st.caption("按当前教师名单统计 · 缺少课次的班型显示为「—」，不当作 0%。")
