@@ -10,8 +10,9 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 
 
-DEFAULT_NAMES = "张洊维、姚蓓蓓、胡海枫、赵万铖、魏志如、吴恙、顾毅清云、杨安小、张玉玲"
+DEFAULT_NAMES = "高弋力、杨安小、顾毅清云、姚蓓蓓、张洊维、赵万铖、陈祉璇、李丽旋、易诗樵、蔡天翔、王皓玥、孙天玥、高子力、胡海枫、张宇瀚、宋蕊君、魏志如、潘蓉、吴蕊、夏梦、徐小涵、刘芳菲、王诗仪、王馨悦、王晨亚盈、刘悦、吴恙、王千羽、吴丹妮、任雨铃、彭钰茂、李睿"
 RATE = "班级反馈完成率"
+RESULT_COLUMNS = ["教师姓名", "总授课课次", "班级反馈完成课次", RATE, "负责项目", "负责科目", "考核等级"]
 BASE_DIR = Path(__file__).resolve().parent
 LEVEL_COLORS = {
     "优秀": ("#047857", "#DCFCE7"),
@@ -266,10 +267,20 @@ def append_total(frame):
     return pd.concat([frame, pd.DataFrame([total])], ignore_index=True)
 
 
+def order_result_columns(frame):
+    """网页与 Excel 使用相同的考核列顺序，课次明细保持原字段顺序。"""
+    if not {"教师姓名", "总授课课次", "班级反馈完成课次", RATE}.issubset(frame.columns):
+        return frame.copy()
+    ordered = [col for col in RESULT_COLUMNS if col in frame]
+    # 待跟进清单保留班型；重复的综合完成率不再单列展示。
+    extras = [col for col in frame.columns if col not in RESULT_COLUMNS and col != "综合完成率"]
+    return frame[ordered + extras].copy()
+
+
 def build_export_sheets(results, details):
-    sheets = {"综合汇总": combine_teacher_stats(results)}
+    sheets = {"综合汇总": order_result_columns(combine_teacher_stats(results))}
     for label, frame in results.items():
-        sheets[label + "考核结果"] = frame
+        sheets[label + "考核结果"] = order_result_columns(frame)
     for label, frame in details.items():
         sheets[label + "课次明细"] = frame
     return sheets
@@ -277,14 +288,14 @@ def build_export_sheets(results, details):
 
 @st.cache_data(show_spinner=False, max_entries=16)
 def generate_excel(sheets):
-    """仅写入单元格值，使用 Excel 默认格式；保留汇总和合计。"""
+    """使用默认外观，仅将完成率设为百分比；保留汇总和合计。"""
     from datetime import date, datetime, time, timedelta
     from openpyxl import Workbook
 
     workbook = Workbook()
     workbook.remove(workbook.active)
     for name, source in sheets.items():
-        frame = append_total(source)
+        frame = append_total(order_result_columns(source))
         sheet = workbook.create_sheet(name)
         sheet.append([str(col) for col in frame.columns])
         for row in frame.itertuples(index=False, name=None):
@@ -301,10 +312,13 @@ def generate_excel(sheets):
             sheet.append(values)
         for row in sheet:
             for cell in row:
-                # 表头、合计和数据全部采用默认样式；原始文本保持文本。
+                # 保持默认外观；仅完成率使用百分比显示，原始文本保持文本。
                 if cell.data_type == "f":
                     cell.data_type = "s"
                 cell._style = None
+                if (cell.row > 1 and frame.columns[cell.column - 1] in (RATE, "综合完成率")
+                        and isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool)):
+                    cell.number_format = "0.0%"
     if not workbook.sheetnames:
         workbook.create_sheet("考核结果")
     output = BytesIO()
@@ -314,6 +328,7 @@ def generate_excel(sheets):
 
 def result_table_html(frame, title, theme="blue"):
     """静态展示表：所有来自表格的文本均转义，数字进度单独绘制。"""
+    frame = order_result_columns(frame)
     accent, pale = ("#059669", "#ECFDF5") if theme == "green" else ("#2563EB", "#EFF6FF")
     css = """
     <style>
@@ -385,7 +400,7 @@ def result_table_html(frame, title, theme="blue"):
 
 def interactive_table(frame):
     """保留 Streamlit 原生表格的排序、搜索、复制和全屏查看功能。"""
-    view = frame.reset_index(drop=True).copy()
+    view = order_result_columns(frame).reset_index(drop=True)
     configs = {}
     for col in (RATE, "综合完成率"):
         if col in view:
@@ -452,7 +467,7 @@ def show_ranking(frame, key, title="教师考核排名", theme="blue"):
         if options:
             selected = st.multiselect("按科目筛选", options, default=options, key=key)
             view = view[view["负责科目"].map(lambda value: any(part in selected for part in str(value).split("、")))]
-    cols = [col for col in ("教师姓名", "负责项目", "负责科目", "总授课课次", "班级反馈完成课次", RATE, "考核等级") if col in view]
+    cols = [col for col in RESULT_COLUMNS if col in view]
     show_result_table(view[cols], title, theme, key=key)
 
 
@@ -591,7 +606,7 @@ def main():
     sheets = build_export_sheets(results, details)
     st.download_button("导出完整考核结果 Excel", generate_excel(sheets), "教师反馈完成率考核结果.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.caption("下载为无格式 Excel，包含综合汇总、各班型考核和课次明细，考核表底部附合计。完成率以小数数值保存（如 0.9 表示 90%）；合计按总课次加权。")
+    st.caption("下载为基础 Excel，包含综合汇总、各班型考核和课次明细，考核表底部附合计。完成率以百分比显示；合计按总课次加权。")
 
 
 if __name__ == "__main__":
